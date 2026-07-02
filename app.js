@@ -836,39 +836,41 @@
   function sectionTile(label, items, entity) {
     const n = items.length;
     const gs = n ? statsFor(items) : null;
-    const t = el("div", "tile sec is-folder s-" + (n ? worstKey(items) : "none") + (n ? "" : " empty"));
     const num = (label.match(/^\d+/) || [""])[0];
     const nameOnly = label.replace(/^\d+\.\s*/, "");
     const onFile = items.filter(i => i.isFile || i.centralProof).length;
-    if (n && !onFile) t.classList.add("nofiles");
-    const pills = gs ? ["expired", "critical", "due"].filter(k => gs[k]).map(k => '<span class="pill s-' + k + '">' + gs[k] + " " + k + '</span>').join("") : "";
-    const mail = (n && items[0].scope !== "provider") ? '<button class="tile-mail" title="Email me this folder" aria-label="Email me this folder">✉</button>' : '';
-    const cov = n ? '<div class="tile-cov' + (onFile ? '' : ' none') + '">' + onFile + ' of ' + n + ' on file</div>' : '';
-    t.innerHTML = '<span class="tile-rail"></span><div class="tile-top">' + (num ? '<div class="tile-num">' + num + '</div>' : '<div class="tile-ic"></div>') +
-      '<div class="tile-topr">' + mail + '<span class="tile-count">' + n + '</span></div></div>' +
-      '<div class="tile-nm">' + esc(nameOnly) + '</div>' + cov + (pills ? '<div class="tile-pills">' + pills + '</div>' : (n ? "" : '<div class="tile-meta">empty</div>'));
+    const pct = n ? Math.round(onFile / n * 100) : 0;
+    const barc = p => p < 40 ? "f-amber" : (p < 80 ? "f-pri" : "f-green");
+    const badge = !n ? null : (gs.expired ? ["action needed", "b-act"] : ((gs.critical || gs.due) ? ["in progress", "b-prog"] : ["ready", "b-ready"]));
+    const t = el("div", "tile tile-entity sec" + (n ? "" : " empty"));
+    t.innerHTML =
+      '<div class="c-top"><div class="c-ic">' + (num || "•") + '</div>' + (badge ? '<span class="badge ' + badge[1] + '">' + badge[0] + '</span>' : '') + '</div>' +
+      '<div class="c-name">' + esc(nameOnly) + '</div>' +
+      (n ? '<div class="prow"><div class="prow-h"><span>Documents on file</span><b>' + pct + '%</b></div><div class="bar"><i class="' + barc(pct) + '" style="width:' + pct + '%"></i></div></div>' : '') +
+      '<div class="c-foot"><span class="l">' + (n ? onFile + ' of ' + n + ' on file' : 'No items yet') + '</span>' + (gs && gs.expired ? '<span class="w">⚠ ' + gs.expired + ' expired</span>' : '') + '</div>';
     if (n) {
       t.onclick = () => navigate([entity, label]);
-      const mb = t.querySelector(".tile-mail"); if (mb) mb.onclick = (e) => { e.stopPropagation(); emailGroupToSelf(entity + " — " + nameOnly, items); };
     } else t.classList.add("disabled");
     return t;
   }
   function docTile(it, showEntity) {
     const s = computeStatus(it);
-    const t = el("div", "tile doc is-file s-" + s.key + (it.supplemental ? " supp" : ""));
     const base = [it.authority, it.number ? "#" + it.number : ""].filter(Boolean).join(" · ");
     const sub = showEntity ? (it.entity + (base ? " · " + base : "")) : base;
+    const bmap = { expired: ["expired", "b-act"], critical: ["critical", "b-act"], due: ["due soon", "b-prog"], good: ["valid", "b-ready"], permanent: ["on file", "b-ready"], recurring: ["recurring", "b-prog"], pending: ["pending", "b-prog"], none: ["—", "b-prog"] };
+    const badge = bmap[s.key] || [s.label, "b-prog"];
     const proof = it.isFile ? '<span class="proof-badge has">📄 Proof</span>'
       : (it.centralProof ? '<span class="proof-badge has" title="Covered by a carrier-level policy from the COI roster">🛡 Via roster</span>'
       : (it.isFile === false ? '<span class="proof-badge no">⚠ No proof</span>' : ""));
-    // every file gets an "email me this item" icon on the tile (sends to the signed-in user)
     const mail = '<button class="tile-mail" title="Email me this item" aria-label="Email me this item">✉</button>';
-    t.innerHTML = '<span class="tile-rail"></span><div class="tile-top"><div class="tile-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' + ICONS[iconFor(it)] + '</svg></div>' + mail + '</div>' +
-      '<div class="tile-nm">' + esc(it.category) + '</div><div class="tile-meta">' + esc(sub || "") + '</div>' +
-      '<div class="tile-foot"><span class="status-badge s-' + s.key + '">' + s.label + '</span>' +
-      '<span class="tile-when">' + (it.expires ? fmtD(it.expires) : (it.permanent ? "No expiry" : ((it.isFile === false && !it.centralProof) ? "Awaiting upload" : "—"))) + '</span>' + proof + '</div>';
+    const t = el("div", "tile tile-entity doc" + (it.supplemental ? " supp" : ""));
+    t.innerHTML =
+      '<div class="c-top"><div class="c-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' + ICONS[iconFor(it)] + '</svg></div><span class="badge ' + badge[1] + '">' + badge[0] + '</span></div>' +
+      '<div class="c-name">' + esc(it.category) + '</div>' +
+      (sub ? '<div class="doc-sub">' + esc(sub) + '</div>' : '') +
+      '<div class="c-foot"><span class="l">' + (it.expires ? fmtD(it.expires) : (it.permanent ? "No expiry" : ((it.isFile === false && !it.centralProof) ? "Awaiting upload" : "—"))) + '</span><span class="doc-fr">' + proof + mail + '</span></div>';
     const mb = t.querySelector(".tile-mail"); if (mb) mb.onclick = (e) => { e.stopPropagation(); emailGroupToSelf(it.entity + " — " + it.category, [it]); };
-    t.onclick = () => openDrawer(it, false);   // click opens the side drawer; "Open in Outlook" there opens the file
+    t.onclick = () => openDrawer(it, false);
     return t;
   }
   function entityHeader(name, items, tab) {
@@ -1138,7 +1140,7 @@
     });
     c.appendChild(flow);
 
-    const grid = el("div", "hgrid" + (state._flip ? " flip-in" : ""));
+    const grid = el("div", "hgrid hgrid-wide" + (state._flip ? " flip-in" : ""));
     state._flip = false;
 
     const searching = (state.search || "").trim().length > 0;
