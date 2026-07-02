@@ -82,6 +82,7 @@ module.exports = async (req, res) => {
       const dates = xl.expiryDatesFromValues(act.values);
       const delta = { generatedAt: new Date().toISOString(), newProviders, inactivated: [...new Set(inactivated)], removed: [...new Set(removed)], dates };
       await writeJsonAt(tok, drivePath("_Sentinel/roster_delta.json"), delta);
+      try { const staff = await xl.buildStaffItems(tok); await writeJsonAt(tok, drivePath("_Sentinel/staff_delta.json"), { generatedAt: new Date().toISOString(), items: staff }); } catch (se) {}
       regenInfo = { newProviders: newProviders.length, inactivated: delta.inactivated.length, removed: delta.removed.length, dates: dates.length };
     } catch (e) { regenInfo = { error: String(e.message || e).slice(0, 200) }; }
     const users = await getUsers();

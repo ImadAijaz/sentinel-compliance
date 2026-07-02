@@ -66,7 +66,12 @@ module.exports = async (req, res) => {
       const dates = xl.expiryDatesFromValues(act.values);
       const delta = { generatedAt: new Date().toISOString(), newProviders, inactivated: [...new Set(inactivated)], removed: [...new Set(removed)], dates };
       await writeJsonAt(token, drivePath("_Sentinel/roster_delta.json"), delta);
-      res.status(200).json({ ok: true, delta: { newProviders: newProviders.length, inactivated: delta.inactivated.length, removed: delta.removed.length, dates: dates.length } });
+      // Live staff sync: read the CHER/Frisco RN+FD workbooks and refresh staff_delta.json.
+      // Best-effort — never fail the roster sync if the staff workbooks are slow/locked.
+      let staffCount = null;
+      try { const staff = await xl.buildStaffItems(token); await writeJsonAt(token, drivePath("_Sentinel/staff_delta.json"), { generatedAt: new Date().toISOString(), items: staff }); staffCount = staff.length; }
+      catch (se) { staffCount = "staff sync skipped: " + String(se.message || se).slice(0, 100); }
+      res.status(200).json({ ok: true, delta: { newProviders: newProviders.length, inactivated: delta.inactivated.length, removed: delta.removed.length, dates: dates.length, staff: staffCount } });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
     return;
   }
