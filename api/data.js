@@ -316,6 +316,38 @@ module.exports = async (req, res) => {
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); return; }
   }
 
+  // ---- onboarding status board: any signed-in user reads; admins toggle steps ----
+  const onboardAction = url.searchParams.get("onboard");
+  if (onboardAction) {
+    try {
+      const { accessToken, readJsonAt, writeJsonAt, drivePath } = require("../lib/graph");
+      const token = await accessToken();
+      const OB = drivePath("_Sentinel/onboarding.json");
+      if (onboardAction === "all") {
+        res.status(200).json((await readJsonAt(token, OB)) || {});
+        return;
+      }
+      if (onboardAction === "set") {
+        if (!s.admin) { res.status(403).json({ error: "admins only" }); return; }
+        let body = ""; await new Promise(r => { req.on("data", c => body += c); req.on("end", r); });
+        let b = {}; try { b = JSON.parse(body || "{}"); } catch (e) {}
+        const ek = String(b.entityKey || "").trim();
+        const step = String(b.step || "").trim();
+        if (!ek || !step) { res.status(400).json({ error: "entityKey and step required" }); return; }
+        const data = (await readJsonAt(token, OB)) || {};
+        const rec = data[ek] || { entity: b.entity || ek, steps: {} };
+        if (b.entity) rec.entity = b.entity;
+        rec.steps = rec.steps || {};
+        if (b.done) rec.steps[step] = { done: true, at: new Date().toISOString(), by: s ? s.email : "" };
+        else delete rec.steps[step];
+        data[ek] = rec;
+        await writeJsonAt(token, OB, data);
+        res.status(200).json({ ok: true, record: rec }); return;
+      }
+      res.status(400).json({ error: "onboard action must be all or set" }); return;
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); return; }
+  }
+
   // ---- server-side OCR (free, OCR.space): read dates off a scanned doc, PDF or image ----
   const ocrUrl = url.searchParams.get("ocr");
   if (ocrUrl) {

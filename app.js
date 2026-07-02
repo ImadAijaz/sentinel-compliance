@@ -390,6 +390,7 @@
       { label: "Save to Excel", fn: exportXlsx, edit: true, localOnly: true },
       { label: "Change log", fn: openAudit },
       { label: "Document gaps", fn: openGapReport },
+      { label: "Onboarding board", fn: openOnboardingBoard },
       { label: "Sync from Excel", fn: syncFromExcel, cloudOnly: true, admin: true },
       { label: "Backup", fn: backup, admin: true },
       { label: "Restore", fn: restore, edit: true, admin: true },
@@ -882,7 +883,8 @@
       '<div class="ent-actions">' + (isProv
         ? '<button class="icon-btn" data-a="pemail">✉ Email provider</button><button class="icon-btn" data-a="portal">🔗 Portal</button><button class="icon-btn" data-a="binder">🗂 Binder</button>' +
           (isAdmin() ? '<button class="icon-btn" data-a="inact" title="Move to Inactive Providers (keeps the row, marks inactive)">📦 Mark inactive</button><button class="icon-btn danger" data-a="delprov" title="Permanently delete from the roster (recoverable from Recycle bin)">🗑 Delete</button>' : "")
-        : '<button class="icon-btn" data-a="email">✉ Email</button><button class="icon-btn" data-a="binder">🗂 Binder</button>') + '</div>';
+        : '<button class="icon-btn" data-a="email">✉ Email</button><button class="icon-btn" data-a="binder">🗂 Binder</button>') +
+      ((tab === "provider" || tab === "staff") ? '<button class="icon-btn" data-a="onboard">📋 Onboarding</button>' : '') + '</div>';
     const it0 = items[0] || {};
     const bind = (a, fn) => { const b = wrap.querySelector('[data-a="' + a + '"]'); if (b) b.onclick = fn; };
     bind("pemail", () => openEmailTemplate(it0));
@@ -891,7 +893,76 @@
     bind("email", () => emailGroupToSelf(name, items));
     bind("inact", () => removeProviderFromRoster(name, it0.entityKey));    // moves to Inactive sheet
     bind("delprov", () => deleteProviderHard(name, it0.entityKey));         // hard delete + trash
+    bind("onboard", () => openOnboarding(it0.entityKey, name));
     return wrap;
+  }
+  // ---- Onboarding status board (per new-hire process checklist, saved to OneDrive) ----
+  var ONBOARD_STEPS = [
+    ["welcome", "Welcome letter sent"],
+    ["docs_requested", "Documents requested (PandaDoc)"],
+    ["docs_received", "Documents received"],
+    ["background", "Background check"],
+    ["references", "References checked"],
+    ["roster", "Added to roster / Paycor"],
+    ["orientation", "Orientation scheduled"],
+  ];
+  function onbFetch() { return fetch("/api/data?onboard=all&_t=" + Date.now(), { cache: "no-store" }).then(r => r.json()).catch(() => ({})); }
+  function openOnboarding(entityKey, name) {
+    if (!entityKey) { toast("No record for this entity."); return; }
+    toast("Loading onboarding…");
+    onbFetch().then(all => {
+      var rec = (all && all[entityKey]) || { steps: {} };
+      var draw = () => {
+        var done = ONBOARD_STEPS.filter(s => rec.steps && rec.steps[s[0]] && rec.steps[s[0]].done).length;
+        var pct = Math.round(done / ONBOARD_STEPS.length * 100);
+        var rows = ONBOARD_STEPS.map(function (s) {
+          var st = rec.steps && rec.steps[s[0]];
+          var on = st && st.done;
+          var meta = on && st.at ? '<div class="item-sub" style="font-size:11px">done ' + esc(new Date(st.at).toLocaleDateString()) + (st.by ? ' · ' + esc(st.by) : '') + '</div>' : '';
+          return '<label style="display:flex;align-items:flex-start;gap:11px;padding:11px 12px;border:1px solid var(--hair);border-radius:10px;background:var(--surface-solid);cursor:' + (isAdmin() ? 'pointer' : 'default') + '">' +
+            '<input type="checkbox" class="onb" data-s="' + s[0] + '"' + (on ? ' checked' : '') + (isAdmin() ? '' : ' disabled') + ' style="margin-top:2px">' +
+            '<div style="flex:1"><div style="font-weight:600' + (on ? ';color:var(--st-good)' : '') + '">' + esc(s[1]) + '</div>' + meta + '</div></label>';
+        }).join("");
+        openModal("Onboarding — " + esc(name),
+          '<div class="item-sub" style="margin-bottom:10px">' + done + ' of ' + ONBOARD_STEPS.length + ' steps complete</div>' +
+          '<div class="ent-bar" style="height:8px;margin-bottom:14px"><i style="display:block;height:100%;border-radius:999px;background:var(--accent);width:' + pct + '%"></i></div>' +
+          '<div style="display:flex;flex-direction:column;gap:8px">' + rows + '</div>' +
+          (isAdmin() ? '' : '<div class="item-sub" style="margin-top:10px">View only — admins can update steps.</div>'));
+        if (isAdmin()) [].forEach.call($("#modalInner").querySelectorAll(".onb"), function (cb) {
+          cb.onchange = function () {
+            var step = cb.dataset.s, done2 = cb.checked;
+            cb.disabled = true;
+            fetch("/api/data?onboard=set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entityKey: entityKey, entity: name, step: step, done: done2 }) })
+              .then(r => r.json()).then(function (d) {
+                if (!d.ok) { toast("Save failed: " + (d.error || "")); cb.checked = !done2; cb.disabled = false; return; }
+                rec = d.record || rec; draw();
+              }).catch(function (e) { toast("Save failed: " + (e.message || e)); cb.disabled = false; });
+          };
+        });
+      };
+      draw();
+    }).catch(() => toast("Couldn't load onboarding."));
+  }
+  function openOnboardingBoard() {
+    toast("Loading onboarding board…");
+    onbFetch().then(all => {
+      var recs = Object.keys(all || {}).map(function (k) {
+        var r = all[k]; var done = ONBOARD_STEPS.filter(s => r.steps && r.steps[s[0]] && r.steps[s[0]].done).length;
+        return { key: k, name: r.entity || k, done: done, total: ONBOARD_STEPS.length };
+      }).filter(r => r.done < r.total).sort((a, b) => a.done - b.done);
+      var body = recs.length
+        ? '<div class="item-sub" style="margin-bottom:12px">People currently mid-onboarding (' + recs.length + '). Completed ones drop off automatically.</div>' +
+          '<div style="display:flex;flex-direction:column;gap:8px">' +
+          recs.map(function (r) {
+            var pct = Math.round(r.done / r.total * 100);
+            return '<div style="display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--hair);border-radius:10px;background:var(--surface-solid)">' +
+              '<div style="flex:1"><div style="font-weight:700">' + esc(r.name) + '</div>' +
+              '<div class="ent-bar" style="height:6px;margin-top:6px"><i style="display:block;height:100%;border-radius:999px;background:var(--accent);width:' + pct + '%"></i></div></div>' +
+              '<div style="font-size:12px;font-weight:700;color:var(--ink-2)">' + r.done + '/' + r.total + '</div></div>';
+          }).join("") + '</div>'
+        : '<div class="empty" style="padding:30px"><h3>Nobody mid-onboarding</h3><p>Open a provider or staff member and click <b>📋 Onboarding</b> to start tracking their steps.</p></div>';
+      openModal("Onboarding board", body);
+    }).catch(() => toast("Couldn't load the board."));
   }
   function isAdmin() { return CLOUD && window.SENTINEL_AUTH && window.SENTINEL_AUTH.admin && !READONLY; }
   function splitName(full) {
