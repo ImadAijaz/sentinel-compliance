@@ -85,8 +85,10 @@ module.exports = async (req, res) => {
       try { const staff = await xl.buildStaffItems(tok); await writeJsonAt(tok, drivePath("_Sentinel/staff_delta.json"), { generatedAt: new Date().toISOString(), items: staff }); } catch (se) {}
       regenInfo = { newProviders: newProviders.length, inactivated: delta.inactivated.length, removed: delta.removed.length, dates: dates.length };
     } catch (e) { regenInfo = { error: String(e.message || e).slice(0, 200) }; }
-    const users = await getUsers();
-    for (const u of users) { try { await send(u.email, (u.tabs && u.tabs.length) ? u.tabs : ["provider", "facility", "other"]); } catch (e) {} }
-    res.status(200).json({ ok: true, sent: users.length, regen: regenInfo });
+    // Automatic digest emails are DISABLED. The 15-day email cadence is handled by the user's
+    // own scheduled routine, not the app — so the daily cron now ONLY refreshes roster/staff
+    // data silently and never emails anyone (previously it emailed every allowed user daily,
+    // and twice over because the cron runs on both the delta and kappa deployments).
+    res.status(200).json({ ok: true, sent: 0, emailsDisabled: true, regen: regenInfo });
   } catch (e) { res.status(200).json({ ok: false, message: String(e.message || e) }); }
 };
