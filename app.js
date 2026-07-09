@@ -313,7 +313,7 @@
     return fetch("/api/uploads-map").then(r => r.json());
   }
   function pullCloudUploads(cb) {
-    const done = (u) => { if (u && typeof u === "object") { _uploadsJSON = JSON.stringify(u); applyUploads(u); } if (cb) cb(); startUploadSync(); };
+    const done = (u) => { if (u && typeof u === "object") { _uploadsJSON = JSON.stringify(u); applyUploads(u); } if (cb) cb(); startUploadSync(); startRosterSync(); };
     // kick a scan (catch new OneDrive files), then read the merged map
     fetch("/api/scan").catch(() => {}).then(() => readUploadsMap().then(done, () => done(null))).catch(() => done(null));
   }
@@ -325,6 +325,31 @@
         if (j !== _uploadsJSON) { _uploadsJSON = j; applyUploads(u); render(); toast("Documents updated."); }
       }).catch(() => {});
     }, 45000);
+  }
+  // Near-real-time roster/Excel sync: every 90s, admins trigger a silent regen (re-reads the
+  // Excel + RN/FD workbooks), then everyone re-fetches and only re-renders if something actually
+  // changed. So edits in Excel or OneDrive surface on the dashboard within ~1–2 min, no Sync click.
+  function rosterSig(items) {
+    let a = 0;
+    for (const i of items) {
+      const s = (i.id || "") + (i.expires || "") + (i.active === false ? "0" : "1") + (i.pending ? "p" : "");
+      for (let k = 0; k < s.length; k++) a = (a * 31 + s.charCodeAt(k)) >>> 0;
+    }
+    return items.length + "|" + a;
+  }
+  function startRosterSync() {
+    if (window._rosterSync || !CLOUD) return;
+    let last = null;
+    const refresh = () => fetch("/api/data").then(r => r.json()).then(d => {
+      if (!d || !d.items) return;
+      const g = rosterSig(d.items);
+      if (last === null) { last = g; return; }
+      if (g !== last) { last = g; window.SENTINEL_SEED = d; buildData(); render(); toast("Updated from Excel / OneDrive."); }
+    }).catch(() => {});
+    fetch("/api/data").then(r => r.json()).then(d => { if (d && d.items) last = rosterSig(d.items); }).catch(() => {});
+    window._rosterSync = setInterval(() => {
+      (isAdmin() ? fetch("/api/data?regen=1", { method: "POST" }).catch(() => {}) : Promise.resolve()).then(refresh);
+    }, 90000);
   }
 
   function lockApp() {

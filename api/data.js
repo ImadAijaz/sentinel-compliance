@@ -132,8 +132,17 @@ module.exports = async (req, res) => {
           const { ensureFolderIn, docsRoot } = require("../lib/graph");
           const folderName = ((first || "") + " " + (last || "")).trim();
           if (folderName) {
-            await ensureFolderIn(token, docsRoot(), "Sama Farooqui/Sentinel/Provider/" + folderName);
-            folderCreate = { ok: true, name: folderName };
+            const base = "Sama Farooqui/Sentinel/Provider/" + folderName;
+            await ensureFolderIn(token, docsRoot(), base);
+            // Build the same 6 SOP-phase subfolders the dashboard shows, so the OneDrive folder
+            // mirrors the dashboard structure and files land in the right phase.
+            const PHASES = [
+              "1. Application & Document Collection", "2. Primary Source Verification",
+              "3. Background & Compliance Review", "4. Medical Staff Review",
+              "5. Payer Enrollment & Facility Setup", "6. Approval & Ongoing Monitoring",
+            ];
+            for (const p of PHASES) { try { await ensureFolderIn(token, docsRoot(), base + "/" + p); } catch (e) {} }
+            folderCreate = { ok: true, name: folderName, subfolders: PHASES.length };
           }
         } catch (e) { folderCreate = { ok: false, error: String(e.message || e).slice(0, 200) }; }
         res.status(200).json({ ok: true, action: "added", sheet: xl.SHEET_ACTIVE, rowIndex: result.rowIndex, snapshot: snap, folder: folderCreate });

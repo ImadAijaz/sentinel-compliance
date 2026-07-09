@@ -84,6 +84,16 @@
       setBar(100);
       setMsg("✓ Saved to OneDrive for: " + (chosen ? chosen.category : chosenId), "#6ee7b7");
       b.disabled = false;
+      // Auto-close once the file is uploaded. Script-opened windows close outright; scanned/
+      // typed tabs can't be closed by script, so we swap in a clear "done" confirmation instead.
+      setTimeout(function () {
+        try { window.close(); } catch (e) {}
+        document.body.innerHTML = '<div class="card" style="text-align:center">' +
+          '<div style="font-size:44px;line-height:1">✅</div>' +
+          '<h1 style="color:#5eead4;margin-top:10px">Upload complete</h1>' +
+          '<div class="sub">Saved to OneDrive for <b style="color:#fff">' + (chosen ? (chosen.category || "") : "") + '</b>.<br>It shows on the dashboard within about a minute.</div>' +
+          '<div class="sub" style="margin-top:14px">You can close this window.</div></div>';
+      }, 1200);
     } catch (e) {
       setBar(null); setMsg("Failed: " + (e.message || e), "#fca5a5"); b.disabled = false;
     }
