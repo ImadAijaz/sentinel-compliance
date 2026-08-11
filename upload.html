@@ -36,6 +36,11 @@
   var q = new URLSearchParams(location.search), id = q.get("item");
   var items = [], cur = null;
   var who = document.getElementById("who"), sel = document.getElementById("itemSel");
+  // Escape anything interpolated into innerHTML below. `id` comes straight from the query string
+  // and this page's links are emailed to providers, so a lookalike URL carrying markup would
+  // otherwise run script on the company's own domain. Category/entity come from Excel too.
+  function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){
+    return ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[c]; }); }
   fetch("/api/provider?item=" + encodeURIComponent(id)).then(function(r){ return r.json(); }).then(function(p){
     items = p.items || [];
     cur = p.current || items.filter(function(x){ return x.id === id; })[0];
@@ -43,11 +48,11 @@
       who.textContent = cur.entity;
       items.sort(function(a,b){ return (a.category||"").localeCompare(b.category||""); });
       sel.innerHTML = items.map(function(it){
-        return '<option value="' + it.id + '"' + (it.id === id ? " selected" : "") + '>' + (it.category || it.id) + '</option>';
+        return '<option value="' + esc(it.id) + '"' + (it.id === id ? " selected" : "") + '>' + esc(it.category || it.id) + '</option>';
       }).join("");
     } else {
       who.textContent = "Item: " + (id || "(none)");
-      sel.innerHTML = '<option value="' + (id || "") + '">' + (id || "(unknown)") + '</option>';
+      sel.innerHTML = '<option value="' + esc(id || "") + '">' + esc(id || "(unknown)") + '</option>';
     }
   }).catch(function(){ who.textContent = "Couldn’t load — please try again."; });
 

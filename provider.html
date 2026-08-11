@@ -30,6 +30,8 @@
   var q=new URLSearchParams(location.search), ekey=q.get("e");
   var items=[];
   var who=document.getElementById("who"), list=document.getElementById("list");
+  function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){
+    return ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[c]; }); }
   if(!ekey){ who.textContent="Welcome"; document.getElementById("summary").textContent="Please open the personal QR code or link your coordinator sent you — it knows which documents are yours."; }
   else {
     fetch("/api/provider?e="+encodeURIComponent(ekey)).then(function(r){return r.json();}).then(function(p){
@@ -53,8 +55,10 @@
       if(onfile) have++;
       var st=status(it,onfile);
       var row=document.createElement("div"); row.className="item";
-      row.innerHTML='<div class="cat">'+it.category+'</div>'+
-        '<div class="meta">'+(it.authority||"")+(it.expires?' · expires '+it.expires:'')+'</div>'+
+      // esc() these — category/authority/expires come from the Excel roster and (for
+      // scan-detected records) from file names, i.e. untrusted text on a login-less page.
+      row.innerHTML='<div class="cat">'+esc(it.category)+'</div>'+
+        '<div class="meta">'+esc(it.authority||"")+(it.expires?' · expires '+esc(it.expires):'')+'</div>'+
         '<span class="pill '+st[1]+'">'+(onfile?'✓ ':'')+st[0]+'</span>'+
         '<div class="act"><input type="file" accept="application/pdf,image/*" capture="environment"><button>Upload</button><div class="m"></div></div>';
       var file=row.querySelector("input"), btn=row.querySelector("button"), m=row.querySelector(".m");

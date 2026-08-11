@@ -128,6 +128,27 @@
   // Live-detected supplemental records from /api/uploads-map (new files in SharePoint that
   // aren't yet in the baked data.json — surfaced without a regenerate).
   let LIVE_SUPP = [];
+  // Last known document map from /api/uploads-map, kept so it can be re-applied after any
+  // rebuild of DATA (see attachUploads / buildData).
+  let ATTACHMENTS = null;
+  // Apply the known documents onto the current DATA items. Safe to call repeatedly.
+  function attachUploads() {
+    if (!ATTACHMENTS) return;
+    DATA.forEach(it => {
+      const v = ATTACHMENTS[it.id]; if (!v) return;
+      const url = (typeof v === "string") ? v : v.url; if (!url) return;
+      it.fileLink = url; it.isFile = true; it.uploaded = true;
+      if (typeof v === "object" && v.name) it.uploadName = v.name;
+      // A date parsed out of a FILENAME is a guess (a phone-scan name like "Scan_2026-01-05.pdf"
+      // is the scan date, not the expiry), so flag it as unconfirmed rather than presenting it as
+      // the real expiry. Never override a human's explicit edit.
+      if (typeof v === "object" && v.date && !OVERLAY.edits[it.id]) {
+        it.expires = v.date; it.permanent = false; it.pending = false;
+        it.expiresAuto = true;
+        it.expiresFromFilename = true;
+      }
+    });
+  }
 
   // ---------- data assembly ----------
   function buildData() {
@@ -144,6 +165,13 @@
     // Append live supplementals not already represented in the seed (avoid double-listing).
     LIVE_SUPP.forEach(it => { if (it && it.id && !seedIds.has(it.id) && !del.has(it.id)) out.push(it); });
     DATA = out;
+    // Re-attach the known documents. Attachments are applied by MUTATING items, so any code that
+    // replaces window.SENTINEL_SEED with a fresh /api/data payload (Sync from Excel, add/delete,
+    // the on-open and 90s auto-sync, tab refocus) used to throw them away — every uploaded or
+    // scanned document silently flipped back to "No proof" until a full page reload, and the
+    // 45s poll saw no change so it never re-applied them. Re-applying here, at the single place
+    // DATA is built, means every rebuild keeps them.
+    attachUploads();
   }
 
   // ---------- scope helpers ----------
@@ -976,7 +1004,10 @@
               .then(r => r.json()).then(function (d) {
                 if (!d.ok) { toast("Save failed: " + (d.error || "")); cb.checked = !done2; cb.disabled = false; return; }
                 rec = d.record || rec; draw();
-              }).catch(function (e) { toast("Save failed: " + (e.message || e)); cb.disabled = false; });
+              // Revert the tick on a network/timeout failure too, not just on an {ok:false} body.
+              // Leaving it checked showed the step as done while the server never recorded it —
+              // the box looked saved until someone reopened it from another machine.
+              }).catch(function (e) { toast("Save failed: " + (e.message || e)); cb.checked = !done2; cb.disabled = false; });
           };
         });
       };
@@ -1023,6 +1054,12 @@
       const f = $("#pAddF").value.trim(), l = $("#pAddL").value.trim(), em = $("#pAddE").value.trim();
       $("#pAddF").classList.toggle("err", !f); $("#pAddL").classList.toggle("err", !l);
       if (!f || !l) { toast("First and last name are required."); return; }
+      // Disable while the request is in flight. The server round trip is slow (workbook
+      // download + backup + append + upload, with lock retries, then 7 folder creates), so an
+      // impatient second click sent a second add: both passed the duplicate check, both
+      // rewrote the whole workbook, and last-write-wins silently dropped one of them.
+      const btn = $("#pAddGo");
+      btn.disabled = true; btn.textContent = "Adding…";
       toast("Writing to the master roster…");
       addProviderRequest(f, l, em, false);
     };
@@ -1103,10 +1140,16 @@
     }).catch(e => toast("Sync failed: " + (e.message || e)));
   }
   function addProviderRequest(f, l, em, force) {
+    // Put the Add button back if we stop without closing the modal, so a failed attempt can be
+    // retried (it is disabled on click to prevent a double-submit rewriting the workbook twice).
+    const reEnable = () => { const b = $("#pAddGo"); if (b) { b.disabled = false; b.textContent = "Add to roster"; } };
     fetch("/api/data?roster=add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ first: f, last: l, email: em || undefined, force: !!force }) })
-        .then(r => r.json())
+        // A 504/500 with a non-JSON body would otherwise reject with "Unexpected token '<'",
+        // which reads like a client bug and hides that the Excel write may well have committed.
+        .then(r => r.json().catch(() => ({ ok: false, error: "The server did not respond properly (HTTP " + r.status + "). The provider MAY have been added — click 'Sync from Excel' and check before retrying." })))
         .then(d => {
           if (!d.ok) {
+            reEnable();
             if (isLockError(d.error)) { toast("⚠ The master Excel is open right now — close WCGTX Physician Roster.xlsx in Excel (desktop + any browser tab), wait a few seconds, then try again."); return; }
             // 409: name already present in the active sheet. Offer to add anyway (true duplicate name).
             if (/already present/i.test(d.error || "")) {
@@ -1126,7 +1169,7 @@
             return fetch("/api/data").then(r=>r.json()).then(d=>{ if(d&&d.items){window.SENTINEL_SEED=d; buildData(); render(); toast("✓ "+f+" "+l+" added — dashboard updated."); }});
           });
         })
-        .catch(e => toast("Add failed: " + (e.message || e)));
+        .catch(e => { reEnable(); toast("Add failed: " + (e.message || e)); });
   }
   function deleteProviderHard(name, entityKey) {
     if (!isAdmin()) { toast("Admins only."); return; }
@@ -1160,7 +1203,7 @@
       const entries = (t && t.entries) || [];
       const errLine = (t && t.error) ? '<div class="empty" style="padding:30px"><h3>Couldn\'t load recycle bin</h3><p>Server said: ' + esc(t.error) + '</p></div>' : null;
       const body = entries.length
-        ? '<div class="item-sub" style="margin-bottom:12px">Deleted providers. The most recent 200 are listed here. Click <b>Restore</b> to put them back into the active Credentials sheet.</div>' +
+        ? '<div class="item-sub" style="margin-bottom:12px">Deleted providers. The most recent 200 are listed here. <b>Restore</b> puts each row back in the sheet it was deleted from — so someone deleted while inactive comes back inactive (tick “Show inactive” to see them). Note: their OneDrive folder is not recreated; recover that from the SharePoint recycle bin.</div>' +
           '<div style="display:flex;flex-direction:column;gap:8px">' +
           entries.map(e => '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--hair);border-radius:10px;background:var(--surface-solid)">' +
             '<div style="flex:1"><div style="font-weight:700">' + esc(e.entity || "(unnamed)") + '</div>' +
@@ -1424,7 +1467,9 @@
 
   function renderTimeline(arr) {
     const wrap = el("div", "timeline");
-    const dated = arr.filter(i => i.expires).sort((a, b) => parseD(a.expires) - parseD(b.expires));
+    // Require a PARSEABLE date, not just a truthy one — a single unparseable expiry (an old
+    // hand-typed value like "pending") used to throw inside the loop below and blank the whole view.
+    const dated = arr.filter(i => i.expires && parseD(i.expires)).sort((a, b) => parseD(a.expires) - parseD(b.expires));
     if (!dated.length) { wrap.innerHTML = '<div class="empty">No dated items to plot.</div>'; return wrap; }
     let curMonth = "";
     dated.forEach(it => {
@@ -1550,18 +1595,23 @@
     }
     const fileHref = isUrl ? raw : encodePath(raw);
     // "Open in Outlook" = open in the Microsoft 365 web (Office/OneDrive) viewer, where the user is signed in.
-    const viewerHref = fileHref + (fileHref.indexOf("?") >= 0 ? "&" : "?") + "web=1";
+    // The document URL comes from /api/uploads-map, which the login-less QR flow can write, so it
+    // is untrusted input: a value like  https://host/x?a=" onmouseover="…  would otherwise break
+    // out of this href attribute and run script in the admin's authenticated session. Escape it,
+    // and only ever emit http(s) or a local file path — never javascript:/data:.
+    const safeHref = /^\s*(https?:|\/|[A-Za-z]:|\\)/.test(fileHref) ? fileHref : "#";
+    const viewerHref = safeHref === "#" ? "#" : safeHref + (safeHref.indexOf("?") >= 0 ? "&" : "?") + "web=1";
     // Inline preview only works for local PDFs; SharePoint blocks cross-origin framing,
     // so on cloud we skip the (always-blank) iframe and open straight in the M365 viewer.
     const inlinePdf = !CLOUD && /\.pdf(\?|#|$)/i.test(raw);
     const fname = it.uploadName || (isUrl ? "" : decodeURIComponent(raw.split("/").pop()));
     const preview = inlinePdf
       ? '<div class="pdf-frame"><div class="pdf-fallback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">' + ICONS.doc + '</svg>If this preview stays blank, click “Open file in Outlook”.</div>' +
-        '<iframe src="' + fileHref + '#view=FitH&toolbar=1" title="Proof document preview" loading="lazy"></iframe></div>'
+        '<iframe src="' + esc(safeHref) + '#view=FitH&toolbar=1" title="Proof document preview" loading="lazy"></iframe></div>'
       : '';
     return '<div class="dfield"><div class="dl">Proof document</div>' +
       (fname ? '<div class="pdf-name">📄 ' + esc(fname) + '</div>' : '') + preview +
-      '<div class="doc-btns"><a class="doc-link" href="' + viewerHref + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>Open file in Outlook</a>' +
+      '<div class="doc-btns"><a class="doc-link" href="' + esc(viewerHref) + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>Open file in Outlook</a>' +
       ((!CLOUD && !READONLY) ? '<button class="doc-link ghost" id="dReadDate">📅 Read date</button>' : '') +
       '</div>' +
       ((CLOUD && it.isFile && !READONLY) ? '<div id="ocrStatus" class="ocr-status">🔎 Checking the document…</div>' : '') +
@@ -1882,6 +1932,10 @@
     const m = $("#modal");
     $("#modalInner").className = "modal";
     $("#modalInner").innerHTML =
+      // NOTE: `title` may legitimately contain markup (openListModal appends a count span), and
+      // some callers pre-escape, so this is NOT escaped here — callers passing untrusted text
+      // MUST esc() it themselves. See openInsights, which reads entity names back out of a
+      // data- attribute (the browser decodes entities on read, undoing the original escaping).
       '<div class="modal-head"><h2>' + title + '</h2><span class="spacer"></span>' + (headExtra || "") +
       '<button class="drawer-close" id="mClose">×</button></div>' +
       '<div class="modal-body">' + bodyHtml + '</div>';
@@ -1946,7 +2000,10 @@
     openModal("Analytics & insights", body);
     const root = $("#modalInner");
     root.querySelectorAll(".clk").forEach(e => e.onclick = () => { const y = +e.dataset.y, m = +e.dataset.m; openListModal("Expiring " + new Date(y, m, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" }), monthItems(all, y, m)); });
-    root.querySelectorAll(".clk-ent").forEach(e => e.onclick = () => openListModal(e.dataset.ent, all.filter(i => i.entity === e.dataset.ent)));
+    // esc() the title: dataset.ent is an entity name from the Excel roster, and reading it back
+    // off the attribute returns the DECODED text — so the escaping done when the attribute was
+    // written is already undone by the time it reaches openModal, which does not escape.
+    root.querySelectorAll(".clk-ent").forEach(e => e.onclick = () => openListModal(esc(e.dataset.ent), all.filter(i => i.entity === e.dataset.ent)));
     root.querySelectorAll(".leg-click").forEach(e => e.onclick = () => { const k = e.dataset.status; openListModal(e.textContent.replace(/\s*\(\d+\)\s*$/, ""), all.filter(i => computeStatus(i).key === k)); });
   }
 
@@ -2045,7 +2102,15 @@
     const def = addDays(base, cycleDays(it)).toISOString().slice(0, 10);
     const v = prompt('Mark "' + it.category + '" renewed.\nNew expiry date (YYYY-MM-DD):', def);
     if (!v) return;
-    const rec = Object.assign({}, it, { expires: v.trim() });
+    // Validate before saving. An unparseable value (someone typing "pending") was stored as the
+    // expiry and later crashed the Timeline render and the .ics export mid-loop, blanking the
+    // view for everyone sharing the overlay.
+    const dv = v.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dv) || !parseD(dv)) {
+      toast("Please enter the date as YYYY-MM-DD (for example " + def + ").");
+      return;
+    }
+    const rec = Object.assign({}, it, { expires: dv });
     saveItem(rec, false);
     OVERLAY.logs[it.id] = (OVERLAY.logs[it.id] || []);
     OVERLAY.logs[it.id].push({ text: "Renewed — new expiry " + v.trim(), date: new Date().toISOString().slice(0, 10) });
@@ -2141,9 +2206,11 @@
   }
   function exportAllICS(arr) {
     const items = arr.filter(i => i.expires && computeStatus(i).key !== "expired");
-    const ev = items.map(it => { const st = computeStatus(it); const when = st.startBy || st.expDate; const dt = when.toISOString().slice(0, 10).replace(/-/g, ""); return ["BEGIN:VEVENT", "UID:" + it.id + "@sentinel", "DTSTART;VALUE=DATE:" + dt, "DTEND;VALUE=DATE:" + dt, "SUMMARY:Renew - " + (it.category + " (" + it.entity + ")").replace(/[\r\n,]/g, " "), "BEGIN:VALARM", "TRIGGER:-P7D", "ACTION:DISPLAY", "DESCRIPTION:Sentinel reminder", "END:VALARM", "END:VEVENT"].join("\r\n"); });
-    download("sentinel-calendar.ics", ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Sentinel//WCGTX//EN"].concat(ev).concat(["END:VCALENDAR"]).join("\r\n"), "text/calendar");
-    toast(items.length + " renewals exported to calendar.");
+    // Skip items with no usable date instead of throwing partway through the export.
+    const ev = items.map(it => { const st = computeStatus(it); const when = st.startBy || st.expDate; if (!when || isNaN(when)) return null; const dt = when.toISOString().slice(0, 10).replace(/-/g, ""); return ["BEGIN:VEVENT", "UID:" + it.id + "@sentinel", "DTSTART;VALUE=DATE:" + dt, "DTEND;VALUE=DATE:" + dt, "SUMMARY:Renew - " + (it.category + " (" + it.entity + ")").replace(/[\r\n,]/g, " "), "BEGIN:VALARM", "TRIGGER:-P7D", "ACTION:DISPLAY", "DESCRIPTION:Sentinel reminder", "END:VALARM", "END:VEVENT"].join("\r\n"); });
+    const events = ev.filter(Boolean);
+    download("sentinel-calendar.ics", ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Sentinel//WCGTX//EN"].concat(events).concat(["END:VCALENDAR"]).join("\r\n"), "text/calendar");
+    toast(events.length + " renewals exported to calendar.");
   }
 
   // ================= FULL PDF REPORT =================
@@ -2320,18 +2387,10 @@
     if (u.ok === false) return;
     // /api/uploads-map now returns { attachments, supplemental }. Old shape (a flat map
     // keyed by item id) is still accepted for the local Python relay.
-    const attachments = (u && u.attachments) ? u.attachments : u;
-    const supp = (u && Array.isArray(u.supplemental)) ? u.supplemental : [];
-    DATA.forEach(it => {
-      const v = attachments && attachments[it.id]; if (!v) return;
-      const url = (typeof v === "string") ? v : v.url; if (!url) return;
-      it.fileLink = url; it.isFile = true; it.uploaded = true;
-      if (typeof v === "object" && v.name) it.uploadName = v.name;
-      if (typeof v === "object" && v.date && !OVERLAY.edits[it.id]) { it.expires = v.date; it.permanent = false; it.pending = false; it.expiresAuto = true; }
-    });
+    ATTACHMENTS = (u && u.attachments) ? u.attachments : u;
     // Replace LIVE_SUPP with the freshly received supplementals (handles adds + deletes).
-    LIVE_SUPP = supp;
-    buildData();
+    LIVE_SUPP = (u && Array.isArray(u.supplemental)) ? u.supplemental : [];
+    buildData();          // rebuilds DATA and re-applies ATTACHMENTS via attachUploads()
   }
   function handleDeepLink() {
     const m = /[#&]item=([^&]+)/.exec(location.hash); if (!m) return;

@@ -272,12 +272,25 @@ module.exports = async (req, res) => {
                 await writeJsonAt(token, trashPath, trash);
               }
             } else {
-              const dup = await xl.findAnywhere(token, last, first);
-              // appendProviderRow — NOT appendRow. appendRow writes positionally at columns 1-2,
-              // which on a roster carrying a leading tracking column puts the surname in that
-              // column and leaves First Name blank. This runs unattended from the folder watcher,
-              // so a positional write here silently corrupts the source of truth.
-              if (!dup) { await xl.snapshotWorkbook(token, "scan-folder-added"); await xl.appendProviderRow(token, xl.SHEET_ACTIVE, last, first); }
+              // Match on the FULL folder name — no surname guessing. "Maria De La Cruz" split as
+              // last="Cruz"/first="Maria De La" matched nothing and appended a duplicate row for
+              // a provider who was already on the roster.
+              const dup = (await xl.findRowByFullName(token, name)) || (parts.length === 2 ? await xl.findAnywhere(token, last, first) : null);
+              if (!dup) {
+                // Only append when the split is UNAMBIGUOUS (exactly "First Last"). With more
+                // tokens we cannot tell where the surname begins, and this runs unattended
+                // against the master roster — guessing wrong writes a bad row into the source of
+                // truth. Surface it for a human to add properly instead.
+                if (parts.length === 2) {
+                  await xl.snapshotWorkbook(token, "scan-folder-added");
+                  // appendProviderRow — NOT appendRow. appendRow writes positionally at columns
+                  // 1-2, which on a roster with a leading tracking column puts the surname in
+                  // that column and leaves First Name blank.
+                  await xl.appendProviderRow(token, xl.SHEET_ACTIVE, last, first);
+                } else {
+                  folderErrors.push({ name, error: "not added automatically: cannot tell which part of \"" + name + "\" is the surname. Add this provider with '+ Add provider' so the name lands in the right columns." });
+                }
+              }
             }
           } catch (e) { folderErrors.push({ name, error: String(e.message || e).slice(0, 200) }); }
           continue;
