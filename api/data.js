@@ -50,9 +50,15 @@ module.exports = async (req, res) => {
         xl.readSheet(token, xl.SHEET_INACTIVE),
       ]);
       const slug = (l, f) => (l + "-" + f).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
-      const namesFrom = sh => (sh.values || []).slice(1)
-        .map(r => ({ last: String((r[0] || "")).replace(/[\*,()]+/g, "").trim(), first: String((r[1] || "")).trim() }))
-        .filter(x => x.last);
+      // Detect the last/first columns from the header row — the roster can gain a leading
+      // tracking column that shifts everything right, and fixed col A/B would then read junk
+      // (e.g. a status value "THHS Email Sent") as the provider's name.
+      const namesFrom = sh => {
+        const { lastIdx, firstIdx } = xl.detectNameCols((sh.values || [])[0] || []);
+        return (sh.values || []).slice(1)
+          .map(r => ({ last: String((r[lastIdx] || "")).replace(/[\*,()]+/g, "").trim(), first: String((r[firstIdx] || "")).trim() }))
+          .filter(x => x.last);
+      };
       const liveActive = namesFrom(act);
       const liveInactive = namesFrom(inact);
       const liveActiveKeys = new Set(liveActive.map(p => slug(p.last, p.first)));
@@ -89,8 +95,11 @@ module.exports = async (req, res) => {
       const token = await accessToken();
       if (rosterAction === "list") {
         const [a, i] = await Promise.all([xl.readSheet(token, xl.SHEET_ACTIVE), xl.readSheet(token, xl.SHEET_INACTIVE)]);
-        const flat = sh => (sh.values || []).slice(1).map((row, idx) => ({ last: row[0] || "", first: row[1] || "", row: idx + 2 }))
-          .filter(r => String(r.last).trim());
+        const flat = sh => {
+          const { lastIdx, firstIdx } = xl.detectNameCols((sh.values || [])[0] || []);
+          return (sh.values || []).slice(1).map((row, idx) => ({ last: row[lastIdx] || "", first: row[firstIdx] || "", row: idx + 2 }))
+            .filter(r => String(r.last).trim());
+        };
         res.status(200).json({ active: flat(a), inactive: flat(i) });
         return;
       }
@@ -118,7 +127,9 @@ module.exports = async (req, res) => {
           }
         }
         const snap = await xl.snapshotWorkbook(token, "before-add");
-        const result = await xl.appendRow(token, xl.SHEET_ACTIVE, [last, first]);
+        // Place the name into the sheet's real last/first columns (header-detected), not a fixed
+        // col A/B — the roster may carry a leading tracking column that shifts the layout.
+        const result = await xl.appendProviderRow(token, xl.SHEET_ACTIVE, last, first);
         // Also append email to COI roster so reminders reach them
         if (b.email && b.email.includes("@")) {
           try { await xl.appendRow(token, "WCGTX COI Roster", [last, first, null, String(b.email).trim()]); } catch (e) {}
