@@ -26,7 +26,10 @@ module.exports = async (req, res) => {
     res.writeHead(302, { Location: "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/authorize?" + p.toString() });
     res.end(); return;
   }
-  if (err || !code) { res.setHeader("Content-Type", "text/html"); res.status(200).send(page("Sign-in didn’t complete", "<p>" + (err || "No authorization code returned.") + "</p>")); return; }
+  // esc() the error — it comes from the query string and was being written into the page raw,
+  // which is reflected XSS on the app's own origin (a crafted link could run script as the
+  // signed-in user and call every authenticated endpoint as them).
+  if (err || !code) { res.setHeader("Content-Type", "text/html"); res.status(200).send(page("Sign-in didn’t complete", "<p>" + esc(err || "No authorization code returned.") + "</p>")); return; }
 
   try {
     const r = await fetch("https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token", {
@@ -51,6 +54,6 @@ module.exports = async (req, res) => {
     res.end();
   } catch (e) {
     res.setHeader("Content-Type", "text/html");
-    res.status(200).send(page("Sign-in problem", "<p>" + String(e.message || e) + "</p>"));
+    res.status(200).send(page("Sign-in problem", "<p>" + esc(String(e.message || e)) + "</p>"));
   }
 };

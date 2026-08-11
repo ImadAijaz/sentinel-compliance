@@ -65,9 +65,10 @@
   }
   async function doUpload(it,file,btn,m,row){
     var f=file.files[0]; if(!f){ m.style.color="#fca5a5"; m.textContent="Choose a file first."; return; }
-    var folder=it.folderLink||it.fileLink||""; btn.disabled=true; m.style.color="#9fd9d0"; m.textContent="Uploading…";
+    btn.disabled=true; m.style.color="#9fd9d0"; m.textContent="Uploading…";
     try{
-      var s=await (await fetch("/api/upload-start?folder="+encodeURIComponent(folder)+"&name="+encodeURIComponent(f.name))).json();
+      // Item id only — the server resolves the folder itself (never trust a caller-supplied path).
+      var s=await (await fetch("/api/upload-start?item="+encodeURIComponent(it.id)+"&name="+encodeURIComponent(f.name))).json();
       if(!s.ok) throw new Error(s.message||"start failed");
       await new Promise(function(res,rej){ var x=new XMLHttpRequest(); x.open("PUT",s.uploadUrl,true);
         x.setRequestHeader("Content-Range","bytes 0-"+(f.size-1)+"/"+f.size);

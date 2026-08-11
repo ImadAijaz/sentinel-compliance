@@ -30,8 +30,11 @@ module.exports = async (req, res) => {
   // ?roster=trash read was making the Recycle bin look empty after a delete.
   res.setHeader("Cache-Control", "no-store, max-age=0");
   const url = new URL(req.url, "http://localhost");
-  // Vercel crons (no user session) are allowed to hit ?regen=1 only.
-  const isCron = /vercel-cron/i.test(req.headers["user-agent"] || "");
+  // Vercel crons (no user session) are allowed to hit ?regen=1 only. Verified with the
+  // CRON_SECRET bearer token — the old check tested the User-Agent string, which any caller can
+  // set, so `curl -A vercel-cron` was treated as the scheduler and could rewrite the cache
+  // unauthenticated and unthrottled.
+  const isCron = require("../lib/session").isCronRequest(req);
   const s = getSession(req);
   if (!s && !(isCron && url.searchParams.get("regen") === "1")) { res.status(401).json({ error: "sign-in required" }); return; }
 
@@ -40,46 +43,194 @@ module.exports = async (req, res) => {
   //      of the cron firing (not a full Python regen — those need data-entry tools we
   //      can't run server-side without Python). Schedule lives in vercel.json. ----
   if (url.searchParams.get("regen") === "1") {
-    if (!isCron && (!s || !s.admin)) { res.status(403).json({ error: "admins only" }); return; }
+    // ANY signed-in user may trigger a refresh: this only writes the app's own cache files
+    // (roster_delta.json / staff_delta.json) and never touches the user's Excel. That's what
+    // makes "open the dashboard = fresh data" work for staff, not just admins.
+    // A short global throttle stops a room full of people opening the app at 8am from
+    // stampeding Graph with workbook downloads — the first open does the work, the rest reuse
+    // it. Admins can bypass with &force=1 (that's what the manual "Sync from Excel" sends).
+    if (!isCron && !s) { res.status(401).json({ error: "sign-in required" }); return; }
+    const force = url.searchParams.get("force") === "1" && s && s.admin;
     try {
       const xl = require("../lib/excel");
-      const { accessToken, drivePath, writeJsonAt } = require("../lib/graph");
+      const { accessToken, drivePath, writeJsonAt, readJsonAt } = require("../lib/graph");
       const token = await accessToken();
-      const [act, inact] = await Promise.all([
-        xl.readSheet(token, xl.SHEET_ACTIVE),
-        xl.readSheet(token, xl.SHEET_INACTIVE),
-      ]);
-      const slug = (l, f) => (l + "-" + f).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
-      // Detect the last/first columns from the header row — the roster can gain a leading
-      // tracking column that shifts everything right, and fixed col A/B would then read junk
-      // (e.g. a status value "THHS Email Sent") as the provider's name.
-      const namesFrom = sh => {
-        const { lastIdx, firstIdx } = xl.detectNameCols((sh.values || [])[0] || []);
-        return (sh.values || []).slice(1)
-          .map(r => ({ last: String((r[lastIdx] || "")).replace(/[\*,()]+/g, "").trim(), first: String((r[firstIdx] || "")).trim() }))
-          .filter(x => x.last);
-      };
-      const liveActive = namesFrom(act);
-      const liveInactive = namesFrom(inact);
-      const liveActiveKeys = new Set(liveActive.map(p => slug(p.last, p.first)));
-      const liveInactiveKeys = new Set(liveInactive.map(p => slug(p.last, p.first)));
-      // Stub records for providers that exist in the live Excel but aren't yet in the baked data.json.
-      // The dashboard will show them as "pending — awaiting roster data" until the next full regen.
-      const seedKeys = new Set((data.items || []).filter(i => i.scope === "provider").map(i => i.entityKey));
-      const newProviders = liveActive.filter(p => !seedKeys.has(slug(p.last, p.first)));
-      const inactivated = (data.items || []).filter(i => i.scope === "provider" && i.active && liveInactiveKeys.has(i.entityKey)).map(i => i.entityKey);
-      const removed = (data.items || []).filter(i => i.scope === "provider" && i.active && !liveActiveKeys.has(i.entityKey) && !liveInactiveKeys.has(i.entityKey)).map(i => i.entityKey);
-      const dates = xl.expiryDatesFromValues(act.values);
-      const delta = { generatedAt: new Date().toISOString(), newProviders, inactivated: [...new Set(inactivated)], removed: [...new Set(removed)], dates };
-      await writeJsonAt(token, drivePath("_Sentinel/roster_delta.json"), delta);
-      // Live staff sync: read the CHER/Frisco RN+FD workbooks and refresh staff_delta.json.
-      // Best-effort — never fail the roster sync if the staff workbooks are slow/locked.
-      let staffCount = null;
-      try { const staff = await xl.buildStaffItems(token); await writeJsonAt(token, drivePath("_Sentinel/staff_delta.json"), { generatedAt: new Date().toISOString(), items: staff }); staffCount = staff.length; }
-      catch (se) { staffCount = "staff sync skipped: " + String(se.message || se).slice(0, 100); }
-      res.status(200).json({ ok: true, delta: { newProviders: newProviders.length, inactivated: delta.inactivated.length, removed: delta.removed.length, dates: dates.length, staff: staffCount } });
+      if (!force && !isCron) {
+        let prev = null;
+        try { prev = await readJsonAt(token, drivePath("_Sentinel/roster_delta.json")); } catch (e) { prev = null; }
+        const stamp = prev && prev.generatedAt ? new Date(prev.generatedAt).getTime() : NaN;
+        const age = isNaN(stamp) ? Infinity : Date.now() - stamp;
+        // Only skip on a *recent* stamp. A future-dated or unparseable stamp falls through and regenerates.
+        if (age >= 0 && age < 60000) { res.status(200).json({ ok: true, skipped: "fresh", ageMs: age }); return; }
+      }
+      // Shared implementation (lib/regen.js) — the daily cron in api/digest.js calls the SAME
+      // function, so the two can never drift apart again. It refuses to write a delta that would
+      // wipe the board, and reports that refusal instead of silently succeeding.
+      const { regenerateRoster } = require("../lib/regen");
+      const r = await regenerateRoster(token);
+      if (r.refused) { res.status(200).json({ ok: false, refused: true, error: r.reason, providersRead: r.providersRead }); return; }
+      res.status(200).json({ ok: true, delta: { newProviders: r.newProviders, inactivated: r.inactivated, removed: r.removed, dates: r.dates, staff: r.staff, providersRead: r.providersRead } });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
     return;
+  }
+
+  // ---- SELF-TEST (admin only): prove the whole Excel + OneDrive round trip actually works. ----
+  //   ?selftest=diagnose  READ-ONLY. Reports the live roster's real column layout, whether the
+  //                       column-shift fix is engaging, provider counts, sample parsed names,
+  //                       delta health, and whether both drives are reachable. Changes nothing.
+  //   ?selftest=full      Everything above, then a REAL round trip: add a clearly-marked test
+  //                       provider ("Sentinel ZZSelftest") -> read it back out of Excel ->
+  //                       create its OneDrive folder + 6 SOP subfolders -> verify they exist ->
+  //                       confirm it would appear on the dashboard -> DELETE the row and the
+  //                       folder -> verify both are gone. Self-cleaning: it removes everything
+  //                       it created, and it snapshots the workbook first. Uses a fixed test
+  //                       name (no timestamp) so a half-finished run is cleaned up by the next.
+  const selftest = url.searchParams.get("selftest");
+  if (selftest) {
+    if (!s || !s.admin) { res.status(403).json({ error: "admins only" }); return; }
+    const steps = [];
+    const step = (name, pass, detail) => { steps.push({ name, pass: !!pass, detail: detail === undefined ? "" : detail }); return !!pass; };
+    const TEST_LAST = "ZZSelftest", TEST_FIRST = "Sentinel";
+    const TEST_NAME = TEST_FIRST + " " + TEST_LAST;
+    const TEST_KEY = (TEST_LAST + "-" + TEST_FIRST).toLowerCase();
+    let cleanupNote = "nothing to clean";
+    try {
+      const xl = require("../lib/excel");
+      const G = require("../lib/graph");
+      const token = await G.accessToken();
+      step("Microsoft Graph token", true, "app-only auth OK");
+
+      // --- 1. Read the live roster and report its ACTUAL column layout -----------------------
+      const act = await xl.readSheet(token, xl.SHEET_ACTIVE);
+      const header = (act.values || [])[0] || [];
+      const labels = header.map(h => (h == null ? "" : String(h && h.text ? h.text : h))).map(x => x.replace(/\s+/g, " ").trim());
+      const { lastIdx, firstIdx } = xl.detectNameCols(header);
+      const credMap = xl.detectCredCols(header);
+      step("Roster downloaded", true, xl.SHEET_ACTIVE + ": " + act.values.length + " rows, " + labels.length + " columns");
+      const colLetter = i => String.fromCharCode(65 + i);
+      const shifted = lastIdx !== 0;
+      step("Name columns detected by header", labels[lastIdx] && /last/i.test(labels[lastIdx]),
+        "Last Name = column " + colLetter(lastIdx) + " (\"" + labels[lastIdx] + "\"), First Name = column " + colLetter(firstIdx) + " (\"" + labels[firstIdx] + "\")" +
+        (shifted ? "  <-- ROSTER IS SHIFTED: extra column(s) before the names. The header-detection fix IS what's keeping this working." : "  (standard A/B layout)"));
+      if (shifted) step("Leading extra column(s)", true, "column A is \"" + labels[0] + "\" — not a name column. Old code read this as the surname; that was the bug.");
+      step("Credential date columns mapped", Object.keys(credMap).length >= 10, Object.keys(credMap).length + " of 15 expiry columns found by header name");
+      const parsed = (act.values || []).slice(1)
+        .map(r => ({ last: String(r[lastIdx] == null ? "" : r[lastIdx]).replace(/[\*,()]+/g, "").trim(), first: String(r[firstIdx] == null ? "" : r[firstIdx]).trim() }))
+        .filter(x => x.last && x.last.toLowerCase() !== TEST_LAST.toLowerCase());
+      const junky = parsed.filter(p => /\b(thhs|email sent|requested|verify|yrly)\b/i.test(p.last)).length;
+      step("Provider names parse cleanly", parsed.length > 0 && junky === 0,
+        parsed.length + " providers read; " + junky + " unusable names. Samples: " +
+        parsed.slice(0, 3).map(p => "\"" + p.first + " " + p.last + "\"").join(", "));
+      const dates = xl.expiryDatesFromValues(act.values);
+      step("Expiry dates read from Excel", dates.length > 0, dates.length + " dates parsed out of the credential columns");
+
+      // --- 2. Delta health ------------------------------------------------------------------
+      let rd = null;
+      try { rd = await G.readJsonAt(token, G.drivePath("_Sentinel/roster_delta.json")); } catch (e) { rd = null; }
+      if (rd) {
+        const nl = rd.newProviders || [];
+        const junkNew = nl.filter(p => /\b(thhs|email sent|requested|verify|yrly)\b/i.test(String(p.last) + " " + String(p.first))).length;
+        const bakedProviderKeys = new Set((data.items || []).filter(i => i.scope === "provider").map(i => i.entityKey));
+        const removedHit = (rd.removed || []).filter(k => bakedProviderKeys.has(k)).length;
+        const corrupt = (nl.length >= 2 && junkNew > nl.length * 0.3) || (bakedProviderKeys.size > 0 && removedHit > bakedProviderKeys.size * 0.3);
+        step("Cached roster delta is healthy", !corrupt,
+          "generated " + (rd.generatedAt || "?") + " — " + nl.length + " new (" + junkNew + " junk), " + removedHit + " of " + bakedProviderKeys.size + " baked providers marked removed" +
+          (corrupt ? ".  CORRUPT -> the guard is suppressing it and showing clean baked data. Click 'Sync from Excel' to rewrite it." : ""));
+      } else step("Cached roster delta is healthy", true, "no delta cached yet (clean baseline)");
+
+      // --- 3. Both drives reachable ----------------------------------------------------------
+      const provRootPath = "Sama Farooqui/Sentinel/Provider";
+      const pr = await fetch(G.docsRoot() + "/root:/" + G.encPath(provRootPath) + ":/children?$select=name&$top=1", { headers: { Authorization: "Bearer " + token } });
+      step("Documents drive reachable (SharePoint)", pr.ok, pr.ok ? provRootPath + " is readable" : "HTTP " + pr.status + " — check MS_DOCS_DRIVE_ID / permissions");
+      let staffOk = 0;
+      for (const sf of ["CHER RN and FD Roster and Credentialing log.xlsx", "Frisco ER RN and FD Roster and Credentialing.xlsx"]) {
+        const p = "WCGTX Phyicians_04.08.2020/..WCGTX Master Rosters/" + sf;
+        const r = await fetch(G.driveRoot() + "/root:/" + G.encPath(p), { headers: { Authorization: "Bearer " + token } }).catch(() => ({ ok: false, status: 0 }));
+        if (r && r.ok) staffOk++;
+      }
+      step("Staff workbooks reachable", staffOk === 2, staffOk + " of 2 RN/FD workbooks found");
+
+      if (selftest !== "full") {
+        const passed = steps.filter(x => x.pass).length;
+        res.status(200).json({ ok: passed === steps.length, mode: "diagnose (read-only, nothing changed)", passed, total: steps.length, rosterShifted: shifted, steps });
+        return;
+      }
+
+      // --- 4. WRITE ROUND TRIP --------------------------------------------------------------
+      // Clean up any leftover test row from an interrupted earlier run, so this is repeatable.
+      const pre = await xl.hardDelete(token, TEST_KEY, TEST_LAST, TEST_FIRST);
+      if (pre.length) cleanupNote = "removed " + pre.length + " leftover test row(s) before starting";
+      const snap = await xl.snapshotWorkbook(token, "before-selftest");
+      step("Workbook backed up first", snap && snap.ok, snap && snap.ok ? ("saved " + snap.name + " to _Sentinel/roster_backups") : ("backup failed: " + ((snap && snap.error) || "?") + " — ABORTING the write test"));
+      if (!snap || !snap.ok) {
+        res.status(200).json({ ok: false, mode: "full (aborted before any write)", passed: steps.filter(x => x.pass).length, total: steps.length, steps });
+        return;
+      }
+
+      // 4a. Add the row the same way "+ Add provider" does.
+      const added = await xl.appendProviderRow(token, xl.SHEET_ACTIVE, TEST_LAST, TEST_FIRST);
+      step("Test provider written to Excel", !!(added && added.rowIndex), "added \"" + TEST_NAME + "\" at row " + (added && added.rowIndex));
+
+      // 4b. Read it back — proves the write landed in the REAL name columns, not a shifted one.
+      const back = await xl.findRowByEntityKey(token, xl.SHEET_ACTIVE, TEST_KEY);
+      step("Row reads back correctly from Excel", !!(back && back.last === TEST_LAST && back.first === TEST_FIRST),
+        back ? ("row " + back.rowIndex + " -> last=\"" + back.last + "\" first=\"" + back.first + "\"" + (back.last === TEST_LAST ? " (matches)" : " (MISMATCH — wrote into the wrong column)")) : "not found after write");
+
+      // 4c. Create the OneDrive folder + 6 SOP subfolders, exactly like the Add flow.
+      const PHASES = ["1. Application & Document Collection", "2. Primary Source Verification", "3. Background & Compliance Review", "4. Medical Staff Review", "5. Payer Enrollment & Facility Setup", "6. Approval & Ongoing Monitoring"];
+      const base = provRootPath + "/" + TEST_NAME;
+      await G.ensureFolderIn(token, G.docsRoot(), base);
+      for (const p of PHASES) { try { await G.ensureFolderIn(token, G.docsRoot(), base + "/" + p); } catch (e) {} }
+      const chk = await fetch(G.docsRoot() + "/root:/" + G.encPath(base) + ":/children?$select=name&$top=50", { headers: { Authorization: "Bearer " + token } });
+      const kids = chk.ok ? (((await chk.json()).value) || []).map(x => x.name) : [];
+      step("OneDrive folder created", chk.ok, chk.ok ? ("Provider/" + TEST_NAME + "/ exists") : ("could not read it back: HTTP " + chk.status));
+      const missing = PHASES.filter(p => !kids.includes(p));
+      step("All 6 SOP subfolders created", missing.length === 0, missing.length === 0 ? "all 6 present" : ("missing: " + missing.join(", ")));
+
+      // 4d. Would it actually show on the dashboard? Rebuild the cache with the SAME shared regen
+      // the app itself uses, then merge for real — so this tests the real code path, not a copy.
+      const { regenerateRoster } = require("../lib/regen");
+      const seedKeys2 = new Set((data.items || []).filter(i => i.scope === "provider").map(i => i.entityKey));
+      const regen1 = await regenerateRoster(token);
+      step("Roster cache rebuilt from Excel", !!regen1.ok, regen1.ok
+        ? (regen1.providersRead + " providers read, " + regen1.newProviders + " new, " + regen1.dates + " dates, staff " + regen1.staff)
+        : ("refused: " + regen1.reason));
+      const { applyRosterDelta } = require("../lib/delta");
+      const merged = await applyRosterDelta((data.items || []).filter(i => i.scope === "provider"));
+      const testItems = merged.filter(i => i.entityKey === TEST_KEY);
+      const realStill = new Set(merged.filter(i => i.scope === "provider" && i.entityKey !== TEST_KEY).map(i => i.entityKey)).size;
+      step("Appears on the dashboard", testItems.length > 0, testItems.length + " credential rows generated for the test provider");
+      step("Real providers still intact", realStill >= seedKeys2.size * 0.9, realStill + " real providers present after the merge (baked baseline " + seedKeys2.size + ")");
+
+      // 4e. Delete both sides and verify.
+      const del = await xl.hardDelete(token, TEST_KEY, TEST_LAST, TEST_FIRST);
+      const folderDel = await G.deleteProviderFolder(token, TEST_NAME);
+      step("Test row deleted from Excel", del.length > 0, "removed " + del.length + " row(s)");
+      step("Test OneDrive folder deleted", folderDel && folderDel.ok, "status " + (folderDel && folderDel.status) + (folderDel && folderDel.note ? " (" + folderDel.note + ")" : ""));
+      const goneA = await xl.findRowByEntityKey(token, xl.SHEET_ACTIVE, TEST_KEY);
+      const goneI = await xl.findRowByEntityKey(token, xl.SHEET_INACTIVE, TEST_KEY);
+      step("Verified gone from both sheets", !goneA && !goneI, (!goneA && !goneI) ? "no trace left in Credentials or Inactive" : "STILL PRESENT — remove row for \"" + TEST_NAME + "\" by hand");
+      const chk2 = await fetch(G.docsRoot() + "/root:/" + G.encPath(base), { headers: { Authorization: "Bearer " + token } });
+      step("Verified folder gone from OneDrive", chk2.status === 404, chk2.status === 404 ? "folder removed (recoverable from the SharePoint recycle bin)" : ("still there: HTTP " + chk2.status + " — delete Provider/" + TEST_NAME + " by hand"));
+
+      // 4f. Rebuild the cache properly now the test row is gone, via the SAME shared regen the app
+      // uses. (Hand-rolling it here wrote inactivated:[], which silently reactivated every
+      // provider who had been marked inactive.)
+      const restored = await regenerateRoster(token);
+      step("Roster cache restored", !!restored.ok, restored.ok
+        ? ("rebuilt from Excel — " + restored.providersRead + " providers, " + restored.dates + " dates; test provider gone")
+        : ("could not rebuild: " + (restored.reason || "unknown") + " — click 'Sync from Excel' once"));
+      cleanupNote = "all test data removed (Excel row + OneDrive folder + cache entry)";
+
+      const passed = steps.filter(x => x.pass).length;
+      res.status(200).json({ ok: passed === steps.length, mode: "full round trip", passed, total: steps.length, rosterShifted: shifted, cleanup: cleanupNote, backup: snap.name, steps });
+      return;
+    } catch (e) {
+      const msg = String(e.message || e);
+      steps.push({ name: "ERROR — test stopped here", pass: false, detail: /ROSTER_LOCKED|423|resourceLocked/i.test(msg) ? "The master Excel is open in Excel right now. Close it everywhere and re-run." : msg.slice(0, 300) });
+      res.status(200).json({ ok: false, mode: selftest === "full" ? "full (incomplete)" : "diagnose", passed: steps.filter(x => x.pass).length, total: steps.length, cleanup: cleanupNote, hint: "If a test row or folder for \"" + TEST_NAME + "\" was left behind, re-run the test — it cleans up leftovers on start.", steps });
+      return;
+    }
   }
 
   // ---- roster ops: add/remove a provider in the master Excel (admin-only) ----
@@ -175,8 +326,11 @@ module.exports = async (req, res) => {
         const entry = (trash.entries || []).find(e => e.id === id);
         if (!entry) { res.status(404).json({ error: "trash entry not found" }); return; }
         await xl.snapshotWorkbook(token, "before-restore");
-        // Restore to the Credentials sheet using the saved row values.
-        for (const r of (entry.rows || [])) await xl.restoreRow(token, xl.SHEET_ACTIVE, r.values);
+        // Restore each row to the sheet it CAME FROM. hardDelete records `sheet` per row; this
+        // used to always restore into the active Credentials sheet, so a terminated provider
+        // deleted out of "Inactive Providers" came back as an ACTIVE provider counting against
+        // compliance — and anyone with rows in both sheets came back twice.
+        for (const r of (entry.rows || [])) await xl.restoreRow(token, r.sheet || xl.SHEET_ACTIVE, r.values);
         trash.entries = trash.entries.filter(e => e.id !== id);
         await writeJsonAt(token, trashPath, trash);
         res.status(200).json({ ok: true, action: "restored", entity: entry.entity });
@@ -187,12 +341,23 @@ module.exports = async (req, res) => {
         // SharePoint folder (Sentinel/Provider/<name>/), log to trash.json for recovery.
         const entityKey = String(b.entityKey || "").trim();
         const snap = await xl.snapshotWorkbook(token, "before-delete");
-        const removed = await xl.hardDelete(token, entityKey, last, first);
+        // Never destroy rows we couldn't back up first.
+        if (!snap || !snap.ok) { res.status(503).json({ error: "Could not back up the roster before deleting, so nothing was deleted. " + ((snap && snap.error) || ""), snapshot: snap }); return; }
+        let removed;
+        try { removed = await xl.hardDelete(token, entityKey, last, first); }
+        catch (de) {
+          const m = String(de.message || de);
+          // hardDelete refuses an ambiguous surname-only delete rather than removing several people.
+          if (/^AMBIGUOUS_DELETE/.test(m)) { res.status(409).json({ error: m.replace(/^AMBIGUOUS_DELETE:\s*/, "") }); return; }
+          throw de;
+        }
         if (!removed.length) { res.status(404).json({ error: "not found in roster", tried: { last, first, entityKey } }); return; }
-        // Delete the SharePoint Provider/<name>/ folder. Build the folder name from the row we
-        // just removed (col 1 = last, col 2 = first) — matches whatever's in the Excel exactly.
-        const r0 = removed[0].values;
-        const folderName = ((r0 && r0[1]) ? r0[1] + " " : "") + (r0 ? r0[0] : "");
+        // Folder name comes from the HEADER-DETECTED last/first that hardDelete returns — not from
+        // guessed array positions. Guessing produced names like "Smith Sent" on a shifted roster,
+        // the delete 404'd, and graph.js reports a 404 as success — so the real folder and every
+        // document in it were left behind while the app said "deleted".
+        const r0 = removed[0];
+        const folderName = ((r0.first ? r0.first + " " : "") + (r0.last || "")).trim();
         const { deleteProviderFolder } = require("../lib/graph");
         const folderDel = await deleteProviderFolder(token, folderName.trim());
         // Log to trash so the user can recover from "Recycle bin".
@@ -208,7 +373,7 @@ module.exports = async (req, res) => {
           else trash.entries = trash.entries || [];
           trash.entries.unshift({
             id, entityKey: entityKey || null,
-            entity: ((first || "") + " " + (last || "")).trim() || (removed[0].values && [removed[0].values[1], removed[0].values[0]].filter(Boolean).join(" ")),
+            entity: ((first || "") + " " + (last || "")).trim() || folderName,
             deletedAt: new Date().toISOString(),
             deletedBy: s ? s.email : "system",
             rows: removed,

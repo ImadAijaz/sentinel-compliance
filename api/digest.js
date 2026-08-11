@@ -39,12 +39,25 @@ function buildHtml(scopes) {
 }
 
 module.exports = async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
+  // The GET path (the scheduled refresh) had NO authentication, so any anonymous caller could
+  // trigger privileged Graph/Excel reads and rewrite the cached roster on demand. GET is now
+  // cron-only (CRON_SECRET bearer) or admin; POST still requires a session, checked below.
+  if (req.method !== "POST") {
+    const { getSession: gs, isCronRequest } = require("../lib/session");
+    const sess = gs(req);
+    if (!isCronRequest(req) && !(sess && sess.admin)) { res.status(401).json({ ok: false, message: "cron or admin only" }); return; }
+  }
   const user = process.env.GMAIL_USER, pass = process.env.GMAIL_APP_PASSWORD;
-  if (!user || !pass) { res.status(200).json({ ok: false, message: "Set GMAIL_USER and GMAIL_APP_PASSWORD in Vercel env vars." }); return; }
-  const tx = nodemailer.createTransport({ service: "gmail", auth: { user, pass } });
-  const send = (to, scopes) => { const { html, subject } = buildHtml(scopes); return tx.sendMail({ from: user, to, subject, html }); };
+  // Mail credentials are only needed for the POST ("Email me") path. The GET path no longer sends
+  // any mail — it just refreshes the roster cache — so missing Gmail config must not abort it.
+  if (req.method === "POST" && (!user || !pass)) { res.status(200).json({ ok: false, message: "Set GMAIL_USER and GMAIL_APP_PASSWORD in Vercel env vars." }); return; }
+  const send = (to, scopes) => {
+    if (!user || !pass) throw new Error("mail not configured");
+    const tx = nodemailer.createTransport({ service: "gmail", auth: { user, pass } });
+    const { html, subject } = buildHtml(scopes);
+    return tx.sendMail({ from: user, to, subject, html });
+  };
 
   try {
     if (req.method === "POST") {
@@ -61,29 +74,14 @@ module.exports = async (req, res) => {
     }
     // GET = scheduled cron: email each allowed person their own tabs
     // Also: regenerate the roster delta so the dashboard picks up Excel changes within ~24h.
+    // Uses the SHARED regen in lib/regen.js — this used to be a private copy of that logic and it
+    // kept the old fixed-column roster reader after the header-detection fix, silently corrupting
+    // the dashboard nightly. One implementation only.
     let regenInfo = null;
     try {
-      const xl = require("../lib/excel");
-      const { accessToken, drivePath, writeJsonAt } = require("../lib/graph");
-      const tok = await accessToken();
-      const [act, inact] = await Promise.all([xl.readSheet(tok, xl.SHEET_ACTIVE), xl.readSheet(tok, xl.SHEET_INACTIVE)]);
-      const slug = (l, f) => (l + "-" + f).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
-      const namesFrom = sh => (sh.values || []).slice(1)
-        .map(r => ({ last: String((r[0] || "")).replace(/[\*,()]+/g, "").trim(), first: String((r[1] || "")).trim() }))
-        .filter(x => x.last);
-      const liveActive = namesFrom(act);
-      const liveInactive = namesFrom(inact);
-      const liveActiveKeys = new Set(liveActive.map(p => slug(p.last, p.first)));
-      const liveInactiveKeys = new Set(liveInactive.map(p => slug(p.last, p.first)));
-      const seedKeys = new Set((data.items || []).filter(i => i.scope === "provider").map(i => i.entityKey));
-      const newProviders = liveActive.filter(p => !seedKeys.has(slug(p.last, p.first)));
-      const inactivated = (data.items || []).filter(i => i.scope === "provider" && i.active && liveInactiveKeys.has(i.entityKey)).map(i => i.entityKey);
-      const removed = (data.items || []).filter(i => i.scope === "provider" && i.active && !liveActiveKeys.has(i.entityKey) && !liveInactiveKeys.has(i.entityKey)).map(i => i.entityKey);
-      const dates = xl.expiryDatesFromValues(act.values);
-      const delta = { generatedAt: new Date().toISOString(), newProviders, inactivated: [...new Set(inactivated)], removed: [...new Set(removed)], dates };
-      await writeJsonAt(tok, drivePath("_Sentinel/roster_delta.json"), delta);
-      try { const staff = await xl.buildStaffItems(tok); await writeJsonAt(tok, drivePath("_Sentinel/staff_delta.json"), { generatedAt: new Date().toISOString(), items: staff }); } catch (se) {}
-      regenInfo = { newProviders: newProviders.length, inactivated: delta.inactivated.length, removed: delta.removed.length, dates: dates.length };
+      const { accessToken } = require("../lib/graph");
+      const { regenerateRoster } = require("../lib/regen");
+      regenInfo = await regenerateRoster(await accessToken());
     } catch (e) { regenInfo = { error: String(e.message || e).slice(0, 200) }; }
     // Automatic digest emails are DISABLED. The 15-day email cadence is handled by the user's
     // own scheduled routine, not the app — so the daily cron now ONLY refreshes roster/staff

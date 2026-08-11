@@ -59,11 +59,12 @@
     if (!f) { setMsg("Please choose a file first.", "#fca5a5"); return; }
     var chosenId = sel.value;
     var chosen = items.filter(function(x){ return x.id === chosenId; })[0] || cur;
-    var folder = (chosen && (chosen.folderLink || chosen.fileLink)) || "";
-    if (!folder) { setMsg("Couldn't determine the folder for this item.", "#fca5a5"); return; }
+    if (!chosenId) { setMsg("Couldn't determine which document this is for.", "#fca5a5"); return; }
     b.disabled = true; setMsg("Preparing…"); setBar(5);
     try {
-      var r1 = await fetch("/api/upload-start?folder=" + encodeURIComponent(folder) + "&name=" + encodeURIComponent(f.name));
+      // Send the item id, not a folder path — the server resolves the destination folder from
+      // its own records so a folder path can never be supplied by the caller.
+      var r1 = await fetch("/api/upload-start?item=" + encodeURIComponent(chosenId) + "&name=" + encodeURIComponent(f.name));
       var s = await r1.json();
       if (!s.ok) throw new Error(s.message || "could not start upload");
       setMsg("Uploading to OneDrive…"); setBar(15);

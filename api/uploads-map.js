@@ -37,8 +37,23 @@ module.exports = async (req, res) => {
       let raw = ""; await new Promise(r => { req.on("data", c => raw += c); req.on("end", r); });
       let b = {}; try { b = JSON.parse(raw || "{}"); } catch (e) {}
       if (!b.item_id || !b.url) { res.status(400).json({ ok: false, message: "need item_id and url" }); return; }
+      // This endpoint records "document X is now on file for credential Y", and it has to stay
+      // reachable without a login for the QR upload flow. Two checks stop it being used to
+      // falsify compliance evidence, which it previously allowed outright:
+      //   1. item_id must be a credential we actually track (no inventing records).
+      //   2. the URL must live in OUR OWN SharePoint/OneDrive — never an arbitrary external
+      //      link, which anyone could otherwise present as an official credential document.
+      const data = require("../data.json");
+      const { applyRosterDelta } = require("../lib/delta");
+      const known = await applyRosterDelta(data.items || []);
+      if (!known.some(i => i.id === b.item_id)) { res.status(404).json({ ok: false, message: "unknown item_id" }); return; }
+      let host = "";
+      try { host = new URL(String(b.url)).hostname.toLowerCase(); } catch (e) { host = ""; }
+      const ok = /(^|\.)sharepoint\.com$/.test(host) || /(^|\.)wcgtx\.sharepoint\.com$/.test(host) ||
+                 /(^|\.)onedrive\.com$/.test(host) || /(^|\.)1drv\.ms$/.test(host);
+      if (!ok) { res.status(400).json({ ok: false, message: "url must point to the company SharePoint/OneDrive" }); return; }
       const map = (await readJsonAt(token, UPLOADS)) || {};
-      map[b.item_id] = { url: b.url, name: b.name || "", date: dateFromName(b.name || "") };
+      map[b.item_id] = { url: String(b.url), name: String(b.name || "").slice(0, 300), date: dateFromName(b.name || "") };
       await writeJsonAt(token, UPLOADS, map);
       res.status(200).json({ ok: true });
       return;

@@ -20,7 +20,18 @@ module.exports = async (req, res) => {
 
   const user = process.env.GMAIL_USER, pass = process.env.GMAIL_APP_PASSWORD;
   // Send to the provider's email when given (Email provider); otherwise the signed-in user.
-  const to = (b.to && /^\S+@\S+\.\S+$/.test(String(b.to).trim())) ? String(b.to).trim() : s.email;
+  // Sending to an ARBITRARY address is restricted: any signed-in user — including a view-only
+  // one — could otherwise send unlimited HTML mail from the company address to anyone, which is
+  // a ready-made phishing tool wearing WCGTX's sender reputation. Non-admins can only mail
+  // themselves; admins may mail a provider. Rejecting (rather than silently rerouting) so the
+  // caller isn't misled about where it went.
+  const wanted = String(b.to || "").trim();
+  let to = s.email;
+  if (wanted && wanted.toLowerCase() !== String(s.email || "").toLowerCase()) {
+    if (!s.admin) { res.status(403).json({ ok: false, message: "Only admins can email another address." }); return; }
+    if (!/^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/.test(wanted)) { res.status(400).json({ ok: false, message: "invalid recipient address" }); return; }
+    to = wanted;
+  }
   if (!user || !pass) { res.status(200).json({ ok: false, message: "Set GMAIL_USER and GMAIL_APP_PASSWORD in Vercel env vars." }); return; }
   if (!html && !text) { res.status(200).json({ ok: false, message: "empty email body" }); return; }
 

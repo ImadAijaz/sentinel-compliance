@@ -155,9 +155,15 @@ function relFromParent(path) {
 }
 
 module.exports = async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  // No wildcard CORS here: this endpoint WRITES. It can auto-fill expiry dates into the master
+  // Excel, snapshot the workbook, and drop roster rows when a provider folder disappears. It
+  // previously had no authentication at all, so any anonymous caller could mutate the company's
+  // source-of-truth spreadsheet. Only the signed-in dashboard calls it — require a session, or
+  // the cron secret for scheduled runs.
   res.setHeader("Cache-Control", "no-store");
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
+  const { getSession, isCronRequest } = require("../lib/session");
+  if (!getSession(req) && !isCronRequest(req)) { res.status(401).json({ ok: false, message: "sign-in required" }); return; }
   try {
     const token = await accessToken();
     const state = (await readJsonAt(token, STATE)) || {};
@@ -217,7 +223,11 @@ module.exports = async (req, res) => {
               }
             } else {
               const dup = await xl.findAnywhere(token, last, first);
-              if (!dup) { await xl.snapshotWorkbook(token, "scan-folder-added"); await xl.appendRow(token, xl.SHEET_ACTIVE, [last, first]); }
+              // appendProviderRow — NOT appendRow. appendRow writes positionally at columns 1-2,
+              // which on a roster carrying a leading tracking column puts the surname in that
+              // column and leaves First Name blank. This runs unattended from the folder watcher,
+              // so a positional write here silently corrupts the source of truth.
+              if (!dup) { await xl.snapshotWorkbook(token, "scan-folder-added"); await xl.appendProviderRow(token, xl.SHEET_ACTIVE, last, first); }
             }
           } catch (e) { folderErrors.push({ name, error: String(e.message || e).slice(0, 200) }); }
           continue;

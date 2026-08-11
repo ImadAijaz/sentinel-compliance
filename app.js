@@ -346,10 +346,22 @@
       if (last === null) { last = g; return; }
       if (g !== last) { last = g; window.SENTINEL_SEED = d; buildData(); render(); toast("Updated from Excel / OneDrive."); }
     }).catch(() => {});
-    fetch("/api/data").then(r => r.json()).then(d => { if (d && d.items) last = rosterSig(d.items); }).catch(() => {});
-    window._rosterSync = setInterval(() => {
-      (isAdmin() ? fetch("/api/data?regen=1", { method: "POST" }).catch(() => {}) : Promise.resolve()).then(refresh);
-    }, 90000);
+    // One sync pass: pull the live Excel into the cache, then re-read and re-render on change.
+    // The server throttles the regen globally (60s), so calling it on every open is cheap and
+    // safe even with many people signing in at once — and it's no longer admin-only, so staff
+    // opening the dashboard also get fresh data.
+    const syncNow = () => fetch("/api/data?regen=1", { method: "POST" }).catch(() => {}).then(refresh);
+    // AUTO-SYNC ON OPEN: establish the baseline signature first (so refresh can tell what
+    // actually changed), then immediately sync. Chaining — not firing both at once — is what
+    // makes a change found on open render right away instead of waiting for the next tick.
+    fetch("/api/data").then(r => r.json()).then(d => { if (d && d.items) last = rosterSig(d.items); }).catch(() => {}).then(syncNow);
+    // Re-sync when the tab regains focus, so a dashboard left open overnight is current the
+    // moment the user comes back to it, without waiting out the interval.
+    if (!window._rosterFocus) {
+      window._rosterFocus = () => { if (document.visibilityState === "visible") syncNow(); };
+      document.addEventListener("visibilitychange", window._rosterFocus);
+    }
+    window._rosterSync = setInterval(syncNow, 90000);
   }
 
   function lockApp() {
@@ -417,6 +429,7 @@
       { label: "Document gaps", fn: openGapReport },
       { label: "Onboarding board", fn: openOnboardingBoard },
       { label: "Sync from Excel", fn: syncFromExcel, cloudOnly: true, admin: true },
+      { label: "System check", fn: openSelfTest, cloudOnly: true, admin: true },
       { label: "Backup", fn: backup, admin: true },
       { label: "Restore", fn: restore, edit: true, admin: true },
       { label: "Manage access", fn: openAccessPanel, cloudOnly: true, admin: true },
@@ -1013,11 +1026,70 @@
     };
   }
   function isLockError(err) { return /ROSTER_LOCKED|resourceLocked|is locked|\b423\b/i.test(String(err || "")); }
+
+  // ---- System check: verifies the Excel + OneDrive round trip really works. ----------------
+  // "Check only" is read-only. "Full test" adds a clearly-marked test provider, confirms the
+  // Excel row and the OneDrive folder + 6 subfolders were created, confirms it shows on the
+  // dashboard, then deletes all of it and verifies the cleanup. Backs up the workbook first.
+  function openSelfTest() {
+    if (!isAdmin()) { toast("Admins only."); return; }
+    const html =
+      '<div style="font-size:13px;line-height:1.65;color:var(--ink-2,#475569)">' +
+      'Verifies the parts that touch your real files: reading the master Excel, writing to it, and creating/deleting OneDrive folders.' +
+      '<ul style="margin:10px 0 0 18px;padding:0">' +
+      '<li><b>Check only</b> — reads and reports. Changes nothing.</li>' +
+      '<li><b>Full test</b> — also adds a test provider named <b>Sentinel ZZSelftest</b>, verifies it appeared in Excel <i>and</i> OneDrive, then removes it and verifies it is gone. The workbook is backed up first.</li>' +
+      '</ul>' +
+      '<div style="margin-top:10px"><b>Close the master Excel file first</b> — if it is open, writing to it is blocked.</div></div>' +
+      '<div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">' +
+      '<button class="btn-primary" id="stDiag" style="flex:1;min-width:130px">Check only</button>' +
+      '<button class="btn-primary" id="stFull" style="flex:1;min-width:130px;background:#b45309">Full test</button>' +
+      '</div><div id="stOut" style="margin-top:14px"></div>';
+    // openModal takes an HTML string and returns the live #modalInner node — query from that,
+    // not from a detached element, or the buttons below would never be wired up.
+    const body = openModal("System check", html);
+    const out = body.querySelector("#stOut");
+    const run = (mode) => {
+      body.querySelector("#stDiag").disabled = true;
+      body.querySelector("#stFull").disabled = true;
+      out.innerHTML = '<div style="font-size:13px;color:var(--ink-2,#475569)">Running ' +
+        (mode === "full" ? "the full round trip — this reads and writes several files, give it up to a minute…" : "checks…") + '</div>';
+      fetch("/api/data?selftest=" + mode, { method: "POST" }).then(r => r.json()).then(d => {
+        body.querySelector("#stDiag").disabled = false;
+        body.querySelector("#stFull").disabled = false;
+        if (d.error) { out.innerHTML = '<div style="color:#b91c1c;font-size:13px">' + esc(d.error) + '</div>'; return; }
+        const rows = (d.steps || []).map(s =>
+          '<div style="display:flex;gap:8px;padding:7px 0;border-bottom:1px solid var(--line,#e2e8f0);align-items:flex-start">' +
+          '<div style="flex:0 0 18px;color:' + (s.pass ? "#059669" : "#b91c1c") + ';font-weight:700">' + (s.pass ? "✓" : "✗") + '</div>' +
+          '<div style="flex:1"><div style="font-weight:600;font-size:13px">' + esc(s.name) + '</div>' +
+          (s.detail ? '<div style="font-size:12px;color:var(--ink-2,#475569);margin-top:2px;word-break:break-word">' + esc(s.detail) + '</div>' : '') +
+          '</div></div>').join("");
+        const allPass = d.passed === d.total;
+        out.innerHTML =
+          '<div style="padding:10px 12px;border-radius:8px;margin-bottom:10px;background:' + (allPass ? "#ecfdf5" : "#fef2f2") + ';color:' + (allPass ? "#065f46" : "#991b1b") + ';font-weight:600;font-size:13px">' +
+          (allPass ? "✓ All " + d.total + " checks passed" : "⚠ " + d.passed + " of " + d.total + " passed — see below") +
+          '<div style="font-weight:400;font-size:12px;margin-top:3px">' + esc(d.mode || "") + (d.cleanup ? " · cleanup: " + esc(d.cleanup) : "") + (d.backup ? " · backup: " + esc(d.backup) : "") + '</div></div>' +
+          (d.rosterShifted ? '<div style="padding:8px 12px;border-radius:8px;margin-bottom:10px;background:#fffbeb;color:#92400e;font-size:12px">Note: your roster has an extra column before the names. The app now finds the columns by their headings, so this is handled — but if someone deletes that column it will keep working too.</div>' : '') +
+          rows + (d.hint ? '<div style="font-size:12px;color:#92400e;margin-top:10px">' + esc(d.hint) + '</div>' : '');
+      }).catch(e => {
+        body.querySelector("#stDiag").disabled = false;
+        body.querySelector("#stFull").disabled = false;
+        out.innerHTML = '<div style="color:#b91c1c;font-size:13px">Could not run: ' + esc(String(e.message || e)) + '</div>';
+      });
+    };
+    body.querySelector("#stDiag").onclick = () => run("diagnose");
+    body.querySelector("#stFull").onclick = () => {
+      if (!confirm("Full test will add a test provider called \"Sentinel ZZSelftest\", verify it in Excel and OneDrive, then delete it.\n\nThe workbook is backed up first. Make sure the master Excel file is closed.\n\nRun it?")) return;
+      run("full");
+    };
+  }
   // Pull the latest roster + expiry dates straight from the master Excel on demand.
   function syncFromExcel() {
     if (!isAdmin()) { toast("Admins only."); return; }
     toast("Syncing from the master Excel…");
-    fetch("/api/data?regen=1", { method: "POST" }).then(r => r.json()).then(d => {
+    // force=1 bypasses the server's 60s regen throttle — a manual click must always do real
+    // work, even if an automatic on-open sync just ran a few seconds ago.
+    fetch("/api/data?regen=1&force=1", { method: "POST" }).then(r => r.json()).then(d => {
       if (d.error) { toast(isLockError(d.error) ? "⚠ The master Excel is open right now — close it and try again." : ("Sync failed: " + d.error)); return; }
       return fetch("/api/data").then(r => r.json()).then(j => {
         if (j && j.items) {
@@ -1047,7 +1119,7 @@
           const folderMsg = d.folder && d.folder.ok ? " folder ✓" : (d.folder ? " folder ✗ " + (d.folder.error || "") : "");
           closeModal(); toast("✓ Added to roster." + folderMsg + " Refreshing dashboard…");
           // Trigger an instant regen so the new provider appears now, not at next cron run.
-          return fetch("/api/data?regen=1", { method: "POST" }).catch(()=>{}).then(()=>{
+          return fetch("/api/data?regen=1&force=1", { method: "POST" }).catch(()=>{}).then(()=>{
             // Re-fetch /api/data and rebuild
             return fetch("/api/data").then(r=>r.json()).then(d=>{ if(d&&d.items){window.SENTINEL_SEED=d; buildData(); render(); toast("✓ "+f+" "+l+" added — dashboard updated."); }});
           });
@@ -1072,7 +1144,7 @@
         var vmsg = (d.trashVerified === undefined || d.trashVerified === null) ? "" : (", verified " + d.trashVerified);
         if (d.warning) toast("⚠ Deleted but " + d.warning + snapMsg + folderMsg);
         else toast("✓ Deleted (" + d.removedRows + " row, trash " + (d.trashEntries || 0) + vmsg + ")" + snapMsg + folderMsg);
-        return fetch("/api/data?regen=1", { method: "POST" }).catch(()=>{}).then(()=>{
+        return fetch("/api/data?regen=1&force=1", { method: "POST" }).catch(()=>{}).then(()=>{
           return fetch("/api/data").then(r=>r.json()).then(d=>{ if(d&&d.items){window.SENTINEL_SEED=d; buildData(); navigate([]); render(); toast("✓ " + name + " permanently deleted. Recoverable from Recycle bin."); }});
         });
       })
@@ -1103,7 +1175,7 @@
           .then(r => r.json()).then(d => {
             if (!d.ok) { toast("Restore failed: " + (d.error || "unknown")); b.disabled = false; b.textContent = "↺ Restore"; return; }
             closeModal(); toast("✓ Restored " + d.entity + ". Refreshing…");
-            return fetch("/api/data?regen=1", { method: "POST" }).catch(()=>{}).then(()=>{
+            return fetch("/api/data?regen=1&force=1", { method: "POST" }).catch(()=>{}).then(()=>{
               return fetch("/api/data").then(r=>r.json()).then(d=>{ if(d&&d.items){window.SENTINEL_SEED=d; buildData(); render(); }});
             });
           }).catch(e => toast("Restore failed: " + (e.message || e)));
@@ -1207,7 +1279,7 @@
           return;
         }
         toast("✓ Moved to inactive. Refreshing dashboard…");
-        return fetch("/api/data?regen=1", { method: "POST" }).catch(()=>{}).then(()=>{
+        return fetch("/api/data?regen=1&force=1", { method: "POST" }).catch(()=>{}).then(()=>{
           return fetch("/api/data").then(r=>r.json()).then(d=>{ if(d&&d.items){window.SENTINEL_SEED=d; buildData(); navigate([]); render(); toast("✓ "+name+" marked inactive."); }});
         });
       })
