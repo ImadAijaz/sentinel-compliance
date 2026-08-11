@@ -313,7 +313,7 @@
     return fetch("/api/uploads-map").then(r => r.json());
   }
   function pullCloudUploads(cb) {
-    const done = (u) => { if (u && typeof u === "object") { _uploadsJSON = JSON.stringify(u); applyUploads(u); } if (cb) cb(); startUploadSync(); startRosterSync(); };
+    const done = (u) => { if (u && typeof u === "object" && u.ok !== false) { _uploadsJSON = JSON.stringify(u); applyUploads(u); } if (cb) cb(); startUploadSync(); startRosterSync(); };
     // kick a scan (catch new OneDrive files), then read the merged map
     fetch("/api/scan").catch(() => {}).then(() => readUploadsMap().then(done, () => done(null))).catch(() => done(null));
   }
@@ -321,7 +321,9 @@
     if (window._upSync || !CLOUD) return;
     window._upSync = setInterval(() => {
       fetch("/api/scan").catch(() => {}).then(() => readUploadsMap()).then(u => {
-        const j = JSON.stringify(u || {});
+        // A failed read (HTTP 200 with ok:false) must not be mistaken for "the documents changed".
+        if (!u || u.ok === false) return;
+        const j = JSON.stringify(u);
         if (j !== _uploadsJSON) { _uploadsJSON = j; applyUploads(u); render(); toast("Documents updated."); }
       }).catch(() => {});
     }, 45000);
@@ -2311,6 +2313,11 @@
   }
   function applyUploads(u) {
     if (!u) return;
+    // /api/uploads-map answers HTTP 200 with { ok:false, message } when Graph errors. Treating
+    // that error object as the attachment map made EVERY document on the board disappear (no
+    // item id matches, supplemental empties) — and the sync still toasted "Documents updated."
+    // A failed read must change nothing at all.
+    if (u.ok === false) return;
     // /api/uploads-map now returns { attachments, supplemental }. Old shape (a flat map
     // keyed by item id) is still accepted for the local Python relay.
     const attachments = (u && u.attachments) ? u.attachments : u;

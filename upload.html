@@ -78,10 +78,22 @@
         xhr.send(f);
       });
       setBar(98);
-      await fetch("/api/uploads-map", {
+      // The file is in OneDrive at this point, but it isn't linked to the credential until this
+      // call succeeds. Swallowing the result told the provider "saved" while the dashboard still
+      // showed "0 on file" — the single most confusing failure this page can produce. Surface it.
+      var mapRes = await fetch("/api/uploads-map", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ item_id: chosenId, url: put.webUrl || "", name: f.name })
-      }).catch(function(){});
+      }).then(function(r){ return r.json().catch(function(){ return { ok: false, message: "HTTP " + r.status }; }); })
+        .catch(function(e){ return { ok: false, message: String(e && e.message || e) }; });
+      if (!mapRes || mapRes.ok === false) {
+        setBar(100);
+        setMsg("⚠ Your file was uploaded, but it could not be linked to the credential (" +
+          (mapRes && mapRes.message ? mapRes.message : "unknown error") +
+          "). Please tell the compliance team so they can attach it.", "#fca5a5");
+        b.disabled = false;
+        return;
+      }
       setBar(100);
       setMsg("✓ Saved to OneDrive for: " + (chosen ? chosen.category : chosenId), "#6ee7b7");
       b.disabled = false;

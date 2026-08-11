@@ -14,7 +14,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Sentinel">
 <link rel="apple-touch-icon" href="icon.svg">
-<link rel="stylesheet" href="styles.css?v=cloud100">
+<link rel="stylesheet" href="styles.css?v=cloud101">
 </head>
 <body>
 
@@ -106,8 +106,8 @@
 <aside class="drawer" id="drawer" aria-hidden="true"></aside>
 <div class="toast" id="toast"></div>
 
-<script src="sha256.js?v=cloud100"></script>
-<script src="config.js?v=cloud100"></script>
+<script src="sha256.js?v=cloud101"></script>
+<script src="config.js?v=cloud101"></script>
 <!-- Microsoft sign-in gate: no roster data is loaded until the session is verified server-side. -->
 <script>
 (function () {
@@ -129,7 +129,7 @@
     return fetch("/api/data").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
       if (!d || !d.items) { showSignIn(); return; }
       window.SENTINEL_SEED = d;
-      var sc = document.createElement("script"); sc.src = "app.js?v=cloud100"; document.body.appendChild(sc);
+      var sc = document.createElement("script"); sc.src = "app.js?v=cloud101"; document.body.appendChild(sc);
     });
   }).catch(showSignIn);
 })();

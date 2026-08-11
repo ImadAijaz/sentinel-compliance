@@ -4,6 +4,7 @@
 // expiry by OCR (OCR.space, free) SERVER-SIDE — so dates fill in automatically, no opening.
 // Results -> _Sentinel/auto_detected.json, which /api/uploads-map merges into the dashboard.
 const { accessToken, docsRoot, docsPathFromUrl, encPath, drivePath, readJsonAt, writeJsonAt, dateFromName } = require("../lib/graph");
+const { applyRosterDelta } = require("../lib/delta");
 // Re-read data.json fresh on each invocation (don't cache via require — warm lambdas would
 // keep a stale index, missing newly added providers/items).
 const fs = require("fs");
@@ -60,7 +61,14 @@ function deriveEntity(folderRel) {
     const phase = parts[2];
     const idx = SOP_PHASES.indexOf(phase);
     if (idx < 0) return null;
-    return { scope: "provider", entity, entityKey: slug(entity.split(" ").reverse().join(" ")), phaseIdx: idx, sectionLabel: phase };
+    // Folder names are "First [Middle...] Last"; the entityKey is "last-first[-middle]".
+    // reverse() only produces that for exactly two tokens — with three it scrambled the key
+    // ("Rahman M Abdul" -> "abdul-m-rahman" instead of "abdul-rahman-m"), so documents and portal
+    // links for every provider with a middle name or two-word surname pointed at a key that
+    // matches no roster row. Move only the LAST token to the front, as the roster does.
+    const toks = entity.split(/\s+/).filter(Boolean);
+    const keyName = toks.length > 1 ? [toks[toks.length - 1]].concat(toks.slice(0, -1)).join(" ") : entity;
+    return { scope: "provider", entity, entityKey: slug(keyName), phaseIdx: idx, sectionLabel: phase };
   }
   if (parts[0] === "State Readiness" && parts.length >= 3) {
     const fac = parts[1], sect = parts[2];
@@ -79,7 +87,11 @@ const OCR_KEY = process.env.OCR_SPACE_KEY || "helloworld";
 const FILE_RULES = {
   "ACLS Certification": "\\bacls\\b", "ATLS Certification": "\\batls\\b", "PALS Certification": "\\bpals\\b",
   "BLS Certification": "\\bbls\\b", "State Medical License": "tmb[ ]*cert|medical license|tmb certificate|tmb[ ]+\\d",
-  "Medical License Verify (annual)": "tmb[ ]*ver|tmb veri", "Individual DEA Registration": "dea[ ]*cert|dea certificate|^dea ",
+  "Medical License Verify (annual)": "tmb[ ]*ver|tmb veri",
+  // "^dea " must NOT swallow "DEA Verification ..." — that catch-all was matching the annual
+  // verification letters and filing them (and their dates) under the registration itself, which
+  // both mislabels the document and writes the wrong expiry into the master Excel.
+  "Individual DEA Registration": "dea[ ]*cert|dea certificate|dea[ ]*reg|^dea (?!ver)",
   "DEA Verify (annual)": "dea[ ]*ver", "Influenza Vaccination": "flu|influenza",
   "TB Screening": "\\btb\\b|ppd|tubercul|quantiferon|\\bcxr\\b|chest", "Driver's License": "txdl|driver|drivers? lic|\\bdl\\b",
   "NPDB Query (2 yrs)": "npdb", "OIG / SAM Exclusion Check": "oig|sam |exclusion", "NPI Verification": "nppes|\\bnpi\\b",
@@ -91,7 +103,18 @@ const FILE_RULES = {
   // so we accept the common boards in addition to literal "board"/"recert".
   "Board Certification": "board|recert|\\b(abem|abfm|abim|abps|aobem|aobim|aboem|abog|abpn|abs|abucm|aagp|abo|abr)\\b"
 };
-function normf(s) { return String(s).toLowerCase().replace(/_/g, " ").replace(/ii/g, "i"); }
+// Normalize a filename for rule matching. Underscores were handled but hyphens and dots were
+// not, so "DEA-Cert-2027.pdf" and "Medical.License.2027.pdf" matched nothing while the
+// underscore spellings matched — the same document filed two ways behaved differently.
+// The old blanket /ii/->/i/ also mangled real words ("Hawaii" -> "Hawai"), so it is now limited
+// to the one thing it was for: the roster's recurring "Verifiy" misspelling.
+function normf(s) {
+  return String(s).toLowerCase()
+    .replace(/[_\-.]+/g, " ")   // hyphens and dots too, not just underscores
+    .replace(/ii/g, "i")        // kept as-is: existing rules were tuned against this behavior
+    .replace(/\s+/g, " ")
+    .trim();
+}
 function extractDates(text) {
   const out = []; let m;
   const push = (y, mo, d) => { if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) out.push(y + "-" + String(mo).padStart(2, "0") + "-" + String(d).padStart(2, "0")); };
@@ -127,7 +150,27 @@ async function ocrDates(token, folderPath, name) {
 }
 
 let INDEX = null;
+// Build the folder->items index from the LIVE item set (baked data.json + the roster delta).
+// It used to read the baked data only, so a provider added through "+ Add provider" was absent
+// from the index: every document later dropped into their brand-new folder matched nothing and
+// their credentials stayed "0 on file" until a full offline regenerate. That is the very first
+// thing a new client does, so it has to work.
+async function indexAsync() {
+  if (INDEX) return INDEX;
+  const base = getData().items || [];
+  let items = base;
+  try { items = await applyRosterDelta(base); } catch (e) { items = base; }
+  const folders = {};
+  for (const it of items) {
+    const rel = docsPathFromUrl(it.folderLink || it.fileLink || "");
+    if (!rel) continue;
+    (folders[rel] = folders[rel] || []).push(it);
+  }
+  INDEX = { folders, rels: Object.keys(folders).sort((a, b) => b.length - a.length) };
+  return INDEX;
+}
 function index() {
+  // Synchronous accessor for call sites that run after indexAsync() has populated the cache.
   if (INDEX) return INDEX;
   const folders = {};
   for (const it of (getData().items || [])) {
@@ -165,6 +208,9 @@ module.exports = async (req, res) => {
   const { getSession, isCronRequest } = require("../lib/session");
   if (!getSession(req) && !isCronRequest(req)) { res.status(401).json({ ok: false, message: "sign-in required" }); return; }
   try {
+    // Warm the folder index from the LIVE item set (includes providers added via the dashboard)
+    // before any matching happens.
+    await indexAsync();
     const token = await accessToken();
     const state = (await readJsonAt(token, STATE)) || {};
     if (!state.deltaLink || state.driveTag !== "docs-v1") {
@@ -194,7 +240,11 @@ module.exports = async (req, res) => {
         if (v.folder && /(^|\/)Sentinel\/Provider$/i.test(folderRel)) {
           const name = String(v.name || "").trim();
           // Skip system / test / placeholder names so a stray folder doesn't pollute the roster.
-          if (!name || /^[._]/.test(name) || /^(test|temp|new folder|untitled)/i.test(name)) continue;
+          // Also skip "zz."-prefixed folders — that's the archive convention used throughout this
+          // OneDrive (and the one the facility soft-delete writes). Without it, archiving a
+          // provider by renaming their folder to "zz.Smith John" made the watcher append a
+          // phantom roster row (last="John", first="zz.Smith") to the master Excel.
+          if (!name || /^[._]/.test(name) || /^zz\./i.test(name) || /^(test|temp|new folder|untitled)/i.test(name)) continue;
           try {
             const xl = require("../lib/excel");
             const parts = name.split(/\s+/);

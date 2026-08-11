@@ -70,13 +70,21 @@
       // Item id only — the server resolves the folder itself (never trust a caller-supplied path).
       var s=await (await fetch("/api/upload-start?item="+encodeURIComponent(it.id)+"&name="+encodeURIComponent(f.name))).json();
       if(!s.ok) throw new Error(s.message||"start failed");
-      await new Promise(function(res,rej){ var x=new XMLHttpRequest(); x.open("PUT",s.uploadUrl,true);
+      var linked = await new Promise(function(res,rej){ var x=new XMLHttpRequest(); x.open("PUT",s.uploadUrl,true);
         x.setRequestHeader("Content-Range","bytes 0-"+(f.size-1)+"/"+f.size);
         x.onload=function(){ (x.status>=200&&x.status<300)?res(JSON.parse(x.responseText||"{}")):rej(new Error("HTTP "+x.status)); };
         x.onerror=function(){rej(new Error("network error"));}; x.send(f);
       }).then(function(put){
-        return fetch("/api/uploads-map",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({item_id:it.id,url:put.webUrl||"",name:f.name})});
+        return fetch("/api/uploads-map",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({item_id:it.id,url:put.webUrl||"",name:f.name})})
+          .then(function(r){ return r.json().catch(function(){ return {ok:false,message:"HTTP "+r.status}; }); });
       });
+      // Don't claim "On file" unless the credential was actually linked — the upload succeeding
+      // and the linking succeeding are two different things.
+      if (!linked || linked.ok === false) {
+        m.style.color="#fca5a5";
+        m.textContent="⚠ Uploaded, but not linked to this credential ("+((linked&&linked.message)||"unknown")+"). Please tell the compliance team.";
+        btn.disabled=false; return;
+      }
       m.style.color="#6ee7b7"; m.textContent="✓ Received. Thank you!";
       row.querySelector(".pill").className="pill on"; row.querySelector(".pill").textContent="✓ On file";
       btn.disabled=false;

@@ -47,11 +47,13 @@ module.exports = async (req, res) => {
       const { applyRosterDelta } = require("../lib/delta");
       const known = await applyRosterDelta(data.items || []);
       if (!known.some(i => i.id === b.item_id)) { res.status(404).json({ ok: false, message: "unknown item_id" }); return; }
+      // Pin to OUR tenant only. A bare /(^|\.)sharepoint\.com$/ would accept
+      // "attacker.sharepoint.com" — anyone can create a Microsoft 365 tenant, so that check
+      // let an outsider host a fake credential and have it accepted as genuine.
+      const TENANT_HOST = (process.env.MS_SHAREPOINT_HOST || "wcgtx.sharepoint.com").toLowerCase();
       let host = "";
       try { host = new URL(String(b.url)).hostname.toLowerCase(); } catch (e) { host = ""; }
-      const ok = /(^|\.)sharepoint\.com$/.test(host) || /(^|\.)wcgtx\.sharepoint\.com$/.test(host) ||
-                 /(^|\.)onedrive\.com$/.test(host) || /(^|\.)1drv\.ms$/.test(host);
-      if (!ok) { res.status(400).json({ ok: false, message: "url must point to the company SharePoint/OneDrive" }); return; }
+      if (host !== TENANT_HOST) { res.status(400).json({ ok: false, message: "url must point to " + TENANT_HOST }); return; }
       const map = (await readJsonAt(token, UPLOADS)) || {};
       map[b.item_id] = { url: String(b.url), name: String(b.name || "").slice(0, 300), date: dateFromName(b.name || "") };
       await writeJsonAt(token, UPLOADS, map);
