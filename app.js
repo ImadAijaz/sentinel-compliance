@@ -978,7 +978,7 @@
     return wrap;
   }
   // ================= PROVIDER PROFILE =================
-  // Renders WCGTX's own "Physician Pre-Qualification Profile" form (the HR + Credentialing
+  // Renders WCGTX's own "Physician Profile" form (the HR + Credentialing
   // internal review sheet) for one provider, filled in from the tracked roster data.
   // Layout, section order, wording and the checkbox/decision blocks follow that document.
   //
@@ -1175,7 +1175,7 @@
     const NT = "not tracked";
 
     let h = '<div class="pq">';
-    h += '<div class="pq-band"><div class="t1">WCGTX</div><div class="t2">PHYSICIAN PRE-QUALIFICATION PROFILE</div>' +
+    h += '<div class="pq-band"><div class="t1">WCGTX</div><div class="t2">PHYSICIAN PROFILE</div>' +
       '<div class="t3">HR + CREDENTIALING &nbsp;·&nbsp; INTERNAL REVIEW</div></div>' +
       '<div class="pq-sub">Texas physician staffing &nbsp;|&nbsp; Preliminary screening before full credentialing</div>';
 
@@ -1226,13 +1226,13 @@
 
     // Summary + decision
     const dOk = p.decision === "GREEN - ADVANCE", dBad = p.decision === "DOES NOT MEET CRITERIA";
-    h += '<div class="pq-h">Credentialing summary &amp; pre-qualification decision</div>' +
+    h += '<div class="pq-h">Credentialing summary &amp; review decision</div>' +
       '<div style="display:grid;gap:7px">' +
       pqBox(p.summary.allScreenOk, "All required checks green / verified / clear") +
       pqBox(p.summary.boardVerified, "At least one required board certification verified") +
       pqBox(p.summary.certsCurrent, "Required certifications current or renewal plan documented") +
       '</div>' +
-      '<div class="pq-dec"><div class="k" style="font-size:9.5px;font-weight:800;letter-spacing:.08em;color:var(--ink-3,#94a3b8);text-transform:uppercase">Pre-qualification decision</div>' +
+      '<div class="pq-dec"><div class="k" style="font-size:9.5px;font-weight:800;letter-spacing:.08em;color:var(--ink-3,#94a3b8);text-transform:uppercase">Review decision</div>' +
       '<div class="pq-row" style="margin-top:7px">' +
       pqBox(dOk, "GREEN - ADVANCE") + pqBox(!dOk && !dBad, "HOLD / FOLLOW-UP") + pqBox(dBad, "DOES NOT MEET CRITERIA") +
       '</div><div class="pq-sub" style="margin:9px 0 0">Suggested from the tracked roster data only. A reviewer confirms and signs off below — this is not an automatic determination.</div></div>';
@@ -1244,7 +1244,7 @@
       esc(pqOutstanding(p).join("\n") || "—") + '</div></div>';
 
     const head = '<button class="icon-btn" id="pfPrint" style="padding:5px 10px">\u{1F5A8} Print</button>';
-    openModal("Pre-Qualification Profile — " + esc(name), h, head);
+    openModal("Physician Profile — " + esc(name), h, head);
     const pb = $("#pfPrint"); if (pb) pb.onclick = () => printProfile(entityKey, name);
     const rd = $("#pqReadDocs");
     if (rd) rd.onclick = () => {
@@ -1293,7 +1293,7 @@
     const pa = $("#printArea");
     pa.innerHTML = '<div class="binder">' +
       '<h1>' + esc(p.name) + '</h1>' +
-      '<div class="bsub">WCGTX Physician Pre-Qualification Profile &middot; HR + Credentialing internal review &middot; Texas physician staffing &middot; printed ' + new Date().toLocaleDateString() + '</div>' +
+      '<div class="bsub">WCGTX Physician Profile &middot; HR + Credentialing internal review &middot; Texas physician staffing &middot; printed ' + new Date().toLocaleDateString() + '</div>' +
       '<table class="btable"><tbody>' +
       '<tr><td><b>Physician name</b></td><td>' + esc(p.name) + '</td><td><b>Profile ID</b></td><td>' + esc(p.entityKey) + '</td></tr>' +
       '<tr><td><b>Primary specialty</b></td><td>' + esc(p.specialty || "not tracked") + '</td><td><b>State</b></td><td>TEXAS</td></tr>' +
@@ -1307,11 +1307,11 @@
       '<table class="btable"><thead><tr><th>Check</th><th>Verification source</th><th>Status</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table>' +
       '<h2 style="font-size:12pt;margin:14px 0 6px">Life-support &amp; trauma certifications</h2>' +
       '<div>' + p.certs.map(c => box(c.current, c.label + " " + (c.current ? "CURRENT" : (c.it ? "EXPIRED" : "MISSING")) + " — Exp: " + c.exp)).join(" &nbsp; ") + '</div>' +
-      '<h2 style="font-size:12pt;margin:14px 0 6px">Credentialing summary &amp; pre-qualification decision</h2>' +
+      '<h2 style="font-size:12pt;margin:14px 0 6px">Credentialing summary &amp; review decision</h2>' +
       '<div>' + box(p.summary.allScreenOk, "All required checks green / verified / clear") + '<br>' +
       box(p.summary.boardVerified, "At least one required board certification verified") + '<br>' +
       box(p.summary.certsCurrent, "Required certifications current or renewal plan documented") + '</div>' +
-      '<div style="margin-top:10px"><b>Pre-qualification decision:</b> ' +
+      '<div style="margin-top:10px"><b>Review decision:</b> ' +
       box(p.decision === "GREEN - ADVANCE", "GREEN - ADVANCE") + " &nbsp; " +
       box(p.decision === "HOLD / FOLLOW-UP", "HOLD / FOLLOW-UP") + " &nbsp; " +
       box(p.decision === "DOES NOT MEET CRITERIA", "DOES NOT MEET CRITERIA") +
