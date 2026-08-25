@@ -967,246 +967,322 @@
     return wrap;
   }
   // ================= PROVIDER PROFILE =================
-  // One page that answers "where does this doctor stand?" in a single table.
+  // Renders WCGTX's own "Physician Pre-Qualification Profile" form (the HR + Credentialing
+  // internal review sheet) for one provider, filled in from the tracked roster data.
+  // Layout, section order, wording and the checkbox/decision blocks follow that document.
   //
-  // The requested checklist mixed two kinds of thing: primary-source VERIFICATIONS ("DEA is
-  // verified with the DEA", "Medical License is verified with the Texas Medical Board") and
-  // DOCUMENTS ("DEA Certificate", "Texas Medical License Certificate"). DEA and Medical License
-  // appeared in both lists. They are not the same requirement — holding the certificate and
-  // having verified it with the issuing authority are separate credentialing steps — so instead
-  // of listing them twice, each is ONE row with a Document column and a Verified column. That's
-  // the de-duplication: 2 rows instead of 4, with nothing lost.
-  //
-  // Rows marked `find` have no dedicated roster column (Social Security Card, Residency, Photo).
-  // Rather than hide them, we look for a matching file among the provider's scanned documents,
-  // so a real gap shows as a gap instead of silently not existing.
-  const PROFILE_SPEC = [
-    ["License & registration", [
-      { label: "Texas Medical License", doc: "State Medical License", verify: "Medical License Verify (annual)", by: "Texas Medical Board" },
-      { label: "DEA Registration", doc: "Individual DEA Registration", verify: "DEA Verify (annual)", by: "DEA — Diversion Control Division" },
-    ]],
-    ["Primary-source checks", [
-      { label: "NPDB Query", verify: "NPDB Query (2 yrs)", by: "NPDB", note: "run every 2 years" },
-      { label: "OIG / SAM Exclusion Check", verify: "OIG / SAM Exclusion Check", by: "OIG / SAM", note: "run annually" },
-      { label: "NPI Verification", verify: "NPI Verification", by: "NPI Registry" },
-    ]],
-    ["Sent for completion / signature", [
-      { label: "Professional Peer References", doc: "Peer References", note: "sent to referees" },
-      { label: "Delineation of Privileges (DOP)", doc: "Delineation of Privileges (DOP)", note: "sent for signatures" },
-    ]],
-    ["Certifications", [
-      { label: "ACLS Certification", doc: "ACLS Certification", find: /\bacls\b/i },
-      { label: "ATLS Certification", doc: "ATLS Certification", find: /\batls\b/i },
-      { label: "PALS Certification", doc: "PALS Certification", find: /\bpals\b/i },
-      { label: "BLS Certification", doc: "BLS Certification", find: /\bbls\b/i },
-      { label: "Board Certification Letter", doc: "Board Certification", note: "if applicable", find: /board|recert|\b(abem|abfm|abim|abps|aobem|aobim|aboem|abog|abpn|abs|abucm)\b/i },
-    ]],
-    ["Identity & education", [
-      { label: "Driver License", doc: "Driver's License" },
-      { label: "Social Security Card", find: /social\s*security|\bssn\b|\bss\s*card\b/i },
-      { label: "Diploma and/or ECFMG", doc: "Medical Diploma" },
-      { label: "Residency", find: /residency|\bpgy\b|good standing/i },
-      { label: "Photo (headshot for badge)", find: /photo|headshot|badge/i },
-    ]],
-    ["Health", [
-      { label: "Recent Flu Documentation", doc: "Influenza Vaccination", find: /\bflu\b|influenza/i },
-      { label: "Recent TB Skin Test", doc: "TB Screening", note: "or CXR / questionnaire", find: /\btb\b|ppd|tubercul|quantiferon|\bcxr\b/i },
-    ]],
-    ["Training & file", [
-      { label: "CV / Resume", doc: "CV / Resume", find: /\bcv\b|resume|curriculum/i },
-      { label: "CME — past 2 years, min 20 hrs", doc: "CME (20 hrs / 2 yrs)", find: /\bcme\b/i },
-      { label: "TSCA Documents", doc: "TSCA Documents", note: "signed within 90 days" },
-      { label: "Certificate of Liability Insurance", doc: "Malpractice / COI Insurance", note: "or provider completes an application" },
-      { label: "Complete Onboarding Packet", doc: "Initial Application" },
-    ]],
+  // Fields the roster genuinely does not hold (degree, phone, employer/group) are shown as
+  // "not tracked" rather than guessed at — this is a screening record, so an invented value is
+  // worse than an obvious blank.
+
+  // Primary-source and background screening rows, in the document's order.
+  //   verify = the category holding the primary-source CHECK (drives the status)
+  //   doc    = the category holding the underlying certificate/document
+  const PQ_SCREEN = [
+    { check: "DEA registration", source: "DEA Diversion Control Division", verify: "DEA Verify (annual)", doc: "Individual DEA Registration", ok: "VERIFIED", detail: "Exp" },
+    { check: "Texas medical license", source: "Texas Medical Board", verify: "Medical License Verify (annual)", doc: "State Medical License", ok: "VERIFIED / ACTIVE", detail: "Exp" },
+    { check: "NPDB query", source: "National Practitioner Data Bank", verify: "NPDB Query (2 yrs)", ok: "CLEAR", detail: "Next query due" },
+    { check: "OIG exclusion check", source: "OIG LEIE", verify: "OIG / SAM Exclusion Check", ok: "CLEAR", detail: "Next due" },
+    { check: "NPI record", source: "NPI Registry / NPPES", verify: "NPI Verification", ok: "VERIFIED / CLEAR", detail: "NPI" },
+    { check: "Professional peer references", source: "Required references received", doc: "Peer References", ok: "GOOD", detail: "On file" },
+    { check: "Malpractice history", source: "Attestation / claims review", doc: "Malpractice / COI Insurance", ok: "NO CLAIMS", detail: "As of" },
   ];
-  // Worst-first ranking, so a row's overall status reflects its weakest part.
-  const PF_RANK = { expired: 0, pending: 1, critical: 2, due: 3, recurring: 3, good: 4, permanent: 5 };
+  const PQ_CERTS = [["ACLS", "ACLS Certification"], ["ATLS", "ATLS Certification"], ["PALS", "PALS Certification"], ["BLS", "BLS Certification"]];
+  // Board code -> the specialty checkbox on the form. Codes come from the roster's
+  // "Board Certified" column (ABEM/ABFM/ABIM plus osteopathic equivalents and others).
+  const PQ_BOARDS = [
+    ["EMERGENCY MEDICINE", /\b(abem|aobem)\b/i],
+    ["INTERNAL MEDICINE", /\b(abim|aobim)\b/i],
+    ["FAMILY MEDICINE", /\b(abfm|aafp)\b/i],
+  ];
+
   function pfFileName(it) {
+    if (!it) return "";
     if (it.uploadName) return it.uploadName;
     try { return decodeURIComponent(String(it.fileLink || "").split("/").pop() || ""); } catch (e) { return String(it.fileLink || ""); }
   }
-  // Resolve the whole spec against one provider's tracked items.
-  function profileRows(entityKey) {
+  // Pick the most useful item per category for this provider (prefer one with a file / a date).
+  function pqIndex(entityKey) {
     const mine = DATA.filter(i => i.scope === "provider" && i.entityKey === entityKey);
-    const byCat = {};
-    // Prefer an item that actually has a document or a date over an empty placeholder.
-    mine.forEach(i => {
-      const prev = byCat[i.category];
-      if (!prev) { byCat[i.category] = i; return; }
-      const score = x => (x.isFile ? 2 : 0) + (x.expires ? 1 : 0);
-      if (score(i) > score(prev)) byCat[i.category] = i;
-    });
-    const out = [];
-    PROFILE_SPEC.forEach(([section, rows]) => {
-      rows.forEach(spec => {
-        const doc = spec.doc ? (byCat[spec.doc] || null) : null;
-        const verify = spec.verify ? (byCat[spec.verify] || null) : null;
-        // Filename fallback. Fires in two situations:
-        //  1. The requirement has no dedicated roster column at all (Social Security Card,
-        //     Residency, Photo) — the only way to know is to look at the actual documents.
-        //  2. The requirement HAS a column but no file attached to it, while a document that
-        //     covers it exists elsewhere. This is common and real: one card named
-        //     "ACLS & BLS_02_20_2028.pdf" proves both, but the scan can only attach a file to a
-        //     single credential, so BLS would otherwise read "Missing" when the proof is on file.
-        // Requires isFile — we are looking for actual proof, not another empty placeholder.
-        const needsFallback = !doc || !doc.isFile;
-        const found = (spec.find && needsFallback)
-          ? (mine.find(i => i.isFile && (spec.find.test(i.category || "") || spec.find.test(pfFileName(i)))) || null)
-          : null;
-        // Which item actually represents "the document" for this row: the tracked one when it
-        // has a file, otherwise whatever the filename fallback turned up. Using the fallback
-        // matters for the status too — an empty placeholder would otherwise drag the row down to
-        // "Action needed" while the real proof sits in a combined document.
-        const docPart = (doc && doc.isFile) ? doc : (found || doc);
-        const viaOther = !!(found && docPart === found && doc);
-        const parts = [docPart, verify].filter(Boolean);
-        // Worst-of across the row's parts, remembering WHICH part is the weak one. Without that
-        // a row could read "Expired" while the Expires column showed a future date — true but
-        // baffling, because the lapsed thing was the annual verification, not the certificate.
-        let status = null, statusFrom = "";
-        const consider = (p, srcLabel) => {
-          if (!p) return;
-          const st = computeStatus(p);
-          if (!status || PF_RANK[st.key] < PF_RANK[status.key]) { status = st; statusFrom = srcLabel; }
-        };
-        consider(docPart, "certificate");
-        consider(verify, "verification");
-        // "Complete" = every part this row needs is present, has a document where a document is
-        // expected, and isn't expired.
-        let complete = false;
-        if (parts.length) {
-          // A document requirement counts as met by the tracked file OR by a document found
-          // elsewhere that covers it.
-          const docOk = !(spec.doc || spec.find) || !!(docPart && (docPart.isFile || docPart.docStatus));
-          const verOk = !spec.verify || !!(verify && (verify.expires || verify.isFile || verify.permanent));
-          complete = docOk && verOk && !!status && status.key !== "expired" && status.key !== "pending";
-        }
-        // Only worth naming the source when the row actually has two things that can disagree.
-        const showFrom = !!(docPart && verify) && status && status.key !== "good" && status.key !== "permanent";
-        out.push({ section, spec, doc, verify, found, docPart, viaOther, status, statusFrom: showFrom ? statusFrom : "", complete, tracked: parts.length > 0 });
-      });
-    });
-    return out;
+    const by = {};
+    const score = x => (x.isFile ? 2 : 0) + (x.expires ? 1 : 0) + (x.permanent ? 1 : 0);
+    mine.forEach(i => { const p = by[i.category]; if (!p || score(i) > score(p)) by[i.category] = i; });
+    return { mine, by };
   }
-  function pfBadge(st, from) {
-    if (!st) return '<span class="pf-b pf-none">Not on file</span>';
-    return '<span class="pf-b s-' + st.key + '">' + esc(st.label) + (st.days != null ? " · " + countdownText(st) : "") + '</span>' +
-      (from ? '<div class="pf-sub pf-dim">' + esc(from) + '</div>' : "");
-  }
-  function pfDocCell(it, expected, viaOther) {
-    if (!expected) return '<span class="pf-dim">n/a</span>';
-    if (!it) return '<span class="pf-b pf-none">Not on file</span>';
-    if (it.isFile) {
-      const n = pfFileName(it);
-      return '<span class="pf-yes">✓ On file</span>' +
-        (n ? '<div class="pf-sub">' + esc(n.length > 46 ? n.slice(0, 46) + "…" : n) + '</div>' : "") +
-        // Say so when the proof lives in another credential's document (a combined card), so the
-        // row isn't read as "we have a dedicated file for this".
-        (viaOther ? '<div class="pf-sub pf-dim">covered by this combined document</div>' : "");
-    }
-    if (it.docStatus) return '<span class="pf-yes">✓ ' + esc(it.docStatus) + '</span>';
-    return '<span class="pf-b pf-none">Missing</span>';
-  }
-  function pfVerCell(it, spec) {
-    if (!spec.verify) return '<span class="pf-dim">n/a</span>';
-    if (!it) return '<span class="pf-b pf-none">Not run</span>';
+  // One screening row's outcome. "ok" means the check is done and not lapsed.
+  function pqState(it) {
+    if (!it) return { key: "none", label: "NOT DONE", ok: false };
     const st = computeStatus(it);
-    const when = it.expires ? fmtD(it.expires) : (it.docStatus || (it.isFile ? "On file" : ""));
-    const ok = st.key !== "expired" && st.key !== "pending";
-    return (ok ? '<span class="pf-yes">✓ Verified</span>' : '<span class="pf-b s-' + st.key + '">' + esc(st.label) + '</span>') +
-      (when ? '<div class="pf-sub">' + (it.expires ? "next due " : "") + esc(when) + '</div>' : "") +
-      (spec.by ? '<div class="pf-sub pf-dim">with ' + esc(spec.by) + '</div>' : "");
+    if (st.key === "expired") return { key: "expired", label: "EXPIRED", ok: false, st };
+    if (st.key === "pending") return { key: "none", label: "OUTSTANDING", ok: false, st };
+    if (!it.expires && !it.permanent && !it.isFile && !it.docStatus) return { key: "none", label: "NOT DONE", ok: false, st };
+    if (st.key === "critical" || st.key === "due") return { key: st.key, label: "DUE SOON", ok: true, st };
+    return { key: "ok", label: "", ok: true, st };
   }
-  function pfStyles() {
-    if ($("#pfStyles")) return;
-    const s = document.createElement("style"); s.id = "pfStyles";
+  function pqBox(on, label) {
+    return '<span class="pq-box' + (on ? " on" : "") + '">' + (on ? "☑" : "☐") + " " + esc(label) + '</span>';
+  }
+  function pqStyles() {
+    if ($("#pqStyles")) return;
+    const s = document.createElement("style"); s.id = "pqStyles";
     s.textContent =
-      '.pf-table{width:100%;border-collapse:collapse;font-size:12.5px}' +
-      '.pf-table th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-3,#94a3b8);font-weight:700;padding:8px 10px;border-bottom:1px solid var(--hair,#e2e8f0)}' +
-      '.pf-table td{padding:9px 10px;border-bottom:1px solid var(--hair,#eef2f7);vertical-align:top}' +
-      '.pf-table tr.pf-sec td{background:var(--bg,#f1f5f9);font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-2,#475569);padding:7px 10px}' +
-      '.pf-table tr.pf-bad td{background:var(--st-expired-bg,rgba(220,38,38,.05))}' +
-      '.pf-yes{color:var(--st-good,#047857);font-weight:800}' +
-      '.pf-n{color:var(--ink-3,#94a3b8);font-variant-numeric:tabular-nums;width:26px}' +
-      '.pf-item{font-weight:650;color:var(--ink,#0f172a)}' +
-      '.pf-sub{font-size:11px;color:var(--ink-2,#64748b);margin-top:2px;word-break:break-word}' +
-      '.pf-dim{color:var(--ink-3,#94a3b8)}' +
-      // The status colours come from the app's own .s-expired/.s-critical/... palette in
-      // styles.css (which is theme-aware), so this only sets the badge SHAPE — never its colour.
-      // border-width/style only — never border-color, or this later rule would override the
-      // colour the .s-* palette sets (this <style> is appended after styles.css).
-      '.pf-b{display:inline-block;padding:3px 8px;border-radius:999px;font-size:10.5px;font-weight:800;' +
-      'white-space:nowrap;border-width:1px;border-style:solid;text-transform:uppercase;letter-spacing:.3px}' +
-      '.pf-b.pf-none{color:var(--ink-2,#64748b);background:var(--bg,#f1f5f9);border-color:var(--hair,#e2e8f0)}' +
-      '.pf-sum{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}' +
-      '.pf-kpi{flex:1;min-width:104px;border:1px solid var(--hair,#e2e8f0);border-radius:10px;padding:9px 11px;background:var(--surface-solid,#fff)}' +
-      '.pf-kpi b{display:block;font-size:19px;line-height:1.15}' +
-      '.pf-kpi span{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-2,#64748b);font-weight:700}' +
-      '.pf-wrap{overflow-x:auto}';
+      '.pq{font-size:12.5px;color:var(--ink,#0f172a)}' +
+      '.pq-band{background:var(--accent,#0f766e);color:#fff;border-radius:10px;padding:12px 15px;margin-bottom:4px}' +
+      '.pq-band .t1{font-size:11px;font-weight:800;letter-spacing:.16em;opacity:.85}' +
+      '.pq-band .t2{font-size:17px;font-weight:800;letter-spacing:.03em;margin-top:2px}' +
+      '.pq-band .t3{font-size:10.5px;font-weight:700;letter-spacing:.1em;opacity:.85;margin-top:3px}' +
+      '.pq-sub{font-size:11px;color:var(--ink-2,#64748b);margin:6px 0 14px}' +
+      '.pq-h{font-size:10.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-2,#475569);' +
+      'border-bottom:2px solid var(--accent,#0f766e);padding-bottom:5px;margin:18px 0 9px}' +
+      '.pq-id{display:grid;grid-template-columns:118px 1fr 1fr;gap:9px;align-items:start}' +
+      '.pq-photo{border:1px dashed var(--hair,#cbd5e1);border-radius:9px;height:132px;display:flex;flex-direction:column;' +
+      'align-items:center;justify-content:center;text-align:center;font-size:9.5px;font-weight:800;letter-spacing:.07em;' +
+      'color:var(--ink-3,#94a3b8);padding:6px;gap:5px}' +
+      '.pq-f{border:1px solid var(--hair,#e2e8f0);border-radius:8px;padding:7px 9px;background:var(--surface-solid,#fff)}' +
+      '.pq-f .k{font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3,#94a3b8)}' +
+      '.pq-f .v{font-size:13px;font-weight:650;margin-top:2px;word-break:break-word}' +
+      '.pq-f .v.na{color:var(--ink-3,#94a3b8);font-weight:600;font-style:italic}' +
+      '.pq-cols2{display:grid;grid-template-columns:1fr 1fr;gap:9px}' +
+      '.pq-box{display:inline-block;border:1px solid var(--hair,#e2e8f0);border-radius:7px;padding:6px 10px;font-size:11.5px;' +
+      'font-weight:800;letter-spacing:.03em;color:var(--ink-2,#64748b);background:var(--surface-solid,#fff);white-space:nowrap}' +
+      '.pq-box.on{color:var(--st-good,#047857);border-color:var(--st-good,#047857);background:var(--st-good-bg,#ecfdf5)}' +
+      '.pq-row{display:flex;gap:7px;flex-wrap:wrap}' +
+      '.pq-t{width:100%;border-collapse:collapse}' +
+      '.pq-t th{font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3,#94a3b8);' +
+      'text-align:left;padding:6px 9px;border-bottom:1px solid var(--hair,#e2e8f0)}' +
+      '.pq-t td{padding:8px 9px;border-bottom:1px solid var(--hair,#eef2f7);vertical-align:middle;font-size:12.5px}' +
+      '.pq-t td.c{font-weight:650}' +
+      '.pq-t td.s{color:var(--ink-2,#64748b);font-size:11.5px}' +
+      '.pq-t tr.bad td{background:var(--st-expired-bg,rgba(220,38,38,.05))}' +
+      '.pq-st{display:inline-block;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:800;letter-spacing:.04em;' +
+      'border-width:1px;border-style:solid;white-space:nowrap}' +
+      '.pq-st.none{color:var(--ink-2,#64748b);background:var(--bg,#f1f5f9);border-color:var(--hair,#e2e8f0)}' +
+      '.pq-dec{border:2px solid var(--accent,#0f766e);border-radius:10px;padding:12px 14px;margin-top:10px;background:var(--surface-solid,#fff)}' +
+      '.pq-note{border:1px solid var(--hair,#e2e8f0);border-radius:8px;min-height:52px;padding:8px 10px;font-size:12px;' +
+      'color:var(--ink-2,#64748b);background:var(--surface-solid,#fff);white-space:pre-wrap}' +
+      '.pq-wrap{overflow-x:auto}';
     document.head.appendChild(s);
   }
-  function openProviderProfile(entityKey, name) {
-    pfStyles();
-    const rows = profileRows(entityKey);
-    const total = rows.length;
-    const done = rows.filter(r => r.complete).length;
-    const expired = rows.filter(r => r.status && r.status.key === "expired").length;
-    const missing = rows.filter(r => !r.tracked).length;
-    const pct = Math.round(100 * done / (total || 1));
-    let body = '<div class="pf-sum">' +
-      '<div class="pf-kpi"><b>' + done + " / " + total + '</b><span>Complete</span></div>' +
-      '<div class="pf-kpi"><b style="color:' + (expired ? "#b91c1c" : "inherit") + '">' + expired + '</b><span>Expired</span></div>' +
-      '<div class="pf-kpi"><b style="color:' + (missing ? "#b45309" : "inherit") + '">' + missing + '</b><span>Nothing on file</span></div>' +
-      '<div class="pf-kpi"><b>' + pct + '%</b><span>Overall</span></div></div>' +
-      '<div class="ent-bar" style="height:8px;margin-bottom:14px"><i style="display:block;height:100%;border-radius:999px;background:var(--accent);width:' + pct + '%"></i></div>' +
-      '<div class="pf-wrap"><table class="pf-table"><thead><tr><th></th><th>Requirement</th><th>Document</th><th>Verified / run</th><th>Expires</th><th>Status</th></tr></thead><tbody>';
-    let sec = "", n = 0;
-    rows.forEach(r => {
-      if (r.section !== sec) { sec = r.section; body += '<tr class="pf-sec"><td colspan="6">' + esc(sec) + '</td></tr>'; }
-      n++;
-      const primary = r.docPart || r.verify;
-      const exp = primary && primary.expires ? fmtD(primary.expires) : (primary && primary.permanent ? "Permanent" : "—");
-      const bad = !r.tracked || (r.status && r.status.key === "expired");
-      body += '<tr' + (bad ? ' class="pf-bad"' : '') + '>' +
-        '<td class="pf-n">' + n + '</td>' +
-        '<td><div class="pf-item">' + esc(r.spec.label) + '</div>' + (r.spec.note ? '<div class="pf-sub pf-dim">' + esc(r.spec.note) + '</div>' : '') + '</td>' +
-        '<td>' + (r.spec.verify && !r.spec.doc ? '<span class="pf-dim">n/a</span>' : pfDocCell(r.docPart, !!(r.spec.doc || r.spec.find), r.viaOther)) + '</td>' +
-        '<td>' + pfVerCell(r.verify, r.spec) + '</td>' +
-        '<td>' + esc(exp) + '</td>' +
-        '<td>' + pfBadge(r.tracked ? r.status : null, r.statusFrom) + '</td></tr>';
+
+  // Resolve everything the form needs for one provider.
+  function pqProfile(entityKey) {
+    const { mine, by } = pqIndex(entityKey);
+    const name = (mine[0] && mine[0].entity) || entityKey;
+    const findDoc = re => mine.find(i => i.isFile && (re.test(i.category || "") || re.test(pfFileName(i)))) || null;
+
+    // Board certification: the roster's Board Certified column lands in authority/number.
+    const bc = by["Board Certification"] || null;
+    const bcode = String((bc && (bc.authority || bc.number)) || "").trim();
+    const lapsed = /lapsed/i.test(bcode);
+    const boards = PQ_BOARDS.map(([label, re]) => ({ label, on: !lapsed && re.test(bcode) }));
+    const other = (!lapsed && bcode && !boards.some(b => b.on) && !/^(yes|no|\?|-+\s*::?|n\/?a)$/i.test(bcode)) ? bcode : "";
+    const boardVerified = boards.some(b => b.on) || !!other;
+    // Only the three mapped boards name a specialty. Any other code (ABS, ABOG, ABPN…) is shown
+    // as the board itself rather than dressed up as a specialty we haven't actually established.
+    const specialty = boards.find(b => b.on)
+      ? boards.find(b => b.on).label.replace(/\b\w+/g, w => w[0] + w.slice(1).toLowerCase())
+      : (other ? "Board: " + other : "");
+
+    const screen = PQ_SCREEN.map(spec => {
+      const vIt = spec.verify ? (by[spec.verify] || null) : null;
+      const dIt = spec.doc ? (by[spec.doc] || null) : null;
+      // Take the WORST of the parts this row declares. Reading only the verification made an
+      // EXPIRED Texas medical license show as "VERIFIED / ACTIVE" whenever the annual
+      // re-verification was still in date — the most dangerous way this form could be wrong.
+      const parts = [];
+      if (spec.verify) parts.push(pqState(vIt));
+      if (spec.doc) parts.push(pqState(dIt));
+      const RANK = { expired: 0, none: 1, critical: 2, due: 2, ok: 3 };
+      parts.sort((a, b) => RANK[a.key] - RANK[b.key]);
+      const state = parts[0] || pqState(null);
+      const driver = vIt || dIt;
+      let detail = "";
+      if (spec.detail === "Exp") {
+        // Two different dates live on this row: the certificate's own expiry (the document's
+        // "Exp:" field) and the annual re-verification. Show both, or a row can read EXPIRED
+        // beside a future expiry date and look self-contradictory.
+        detail = dIt && dIt.expires ? "Exp: " + fmtD(dIt.expires) : (dIt && dIt.isFile ? "Certificate on file, no date" : "Exp: —");
+        if (vIt && vIt.expires) {
+          detail += computeStatus(vIt).key === "expired"
+            ? " · re-verification overdue since " + fmtD(vIt.expires)
+            : " · next verification " + fmtD(vIt.expires);
+        } else if (!vIt) detail += " · not yet verified";
+      }
+      else if (spec.detail === "NPI") detail = (vIt && String(vIt.number || "").trim()) ? "NPI: " + vIt.number : (vIt && (vIt.isFile || vIt.docStatus) ? "Registry record on file" : "NPI: —");
+      else if (spec.detail === "On file") detail = dIt && dIt.isFile ? pfFileName(dIt) : (dIt && dIt.docStatus ? dIt.docStatus : "—");
+      else if (spec.detail === "As of") detail = dIt && dIt.expires ? "As of: " + fmtD(dIt.expires) : (dIt && dIt.isFile ? "Attestation on file" : "As of: —");
+      else detail = driver && driver.expires ? spec.detail + ": " + fmtD(driver.expires) : spec.detail + ": —";
+      return { spec, state, detail, doc: dIt, verify: vIt };
     });
-    body += '</tbody></table></div>' +
-      '<div class="item-sub" style="margin-top:12px">“Verified / run” is the primary-source check with the issuing authority — separate from holding the certificate, which is the Document column. Rows shaded red are expired or have nothing on file.</div>';
-    const head = '<button class="icon-btn" id="pfPrint" style="padding:5px 10px">🖨 Print</button>';
-    openModal("Profile — " + esc(name), body, head);
+
+    const certs = PQ_CERTS.map(([label, cat]) => {
+      const it = by[cat] || null;
+      const st = it ? computeStatus(it) : null;
+      const current = !!(it && st && st.key !== "expired" && st.key !== "pending");
+      return { label, it, st, current, exp: it && it.expires ? fmtD(it.expires) : (it && it.permanent ? "Permanent" : "—") };
+    });
+
+    const allScreenOk = screen.every(r => r.state.ok);
+    // The form mandates board certification ("at least one must be verified") but does NOT say
+    // all four life-support cards are required — which varies by role. So this line means "every
+    // certification actually on record is current", not "holds all four". A card that is simply
+    // absent is listed under outstanding items instead of being treated as a policy failure,
+    // because inventing a stricter rule than the form states would misreport people.
+    const onRecord = certs.filter(c => c.it);
+    const certsCurrent = onRecord.length > 0 && onRecord.every(c => c.current);
+    // Decision policy — deliberately conservative.
+    //   GREEN               everything verified, current and clear
+    //   HOLD / FOLLOW-UP    ANY gap, expiry or missing record. This is the default.
+    //   DOES NOT MEET       only when the roster POSITIVELY records no board certification
+    //                       (the column literally reads "No").
+    // A missing or blank record is a data gap, not a finding about the physician, so it must
+    // never auto-produce "does not meet criteria" — that is a statement about a real person's
+    // professional standing. An overdue annual re-verification is likewise a follow-up, not a
+    // disqualification: the underlying licence or DEA registration can still be valid.
+    // The reviewer can always tick a different box; the app only proposes.
+    const boardExplicitlyNone = /^no$/i.test(bcode);
+    let decision = "HOLD / FOLLOW-UP";
+    if (allScreenOk && boardVerified && certsCurrent) decision = "GREEN - ADVANCE";
+    else if (boardExplicitlyNone) decision = "DOES NOT MEET CRITERIA";
+
+    return {
+      entityKey, name, mine, by, screen, certs, boards, other, boardVerified, bcode, lapsed, specialty,
+      email: (mine.find(i => i.email) || {}).email || "",
+      headshot: findDoc(/photo|headshot|badge/i),
+      summary: { allScreenOk, boardVerified, certsCurrent },
+      decision,
+    };
+  }
+
+  function openProviderProfile(entityKey, name) {
+    pqStyles();
+    const p = pqProfile(entityKey);
+    const fld = (k, v, na) => '<div class="pq-f"><div class="k">' + esc(k) + '</div><div class="v' + (na ? " na" : "") + '">' + esc(v) + '</div></div>';
+    const NT = "not tracked";
+
+    let h = '<div class="pq">';
+    h += '<div class="pq-band"><div class="t1">WCGTX</div><div class="t2">PHYSICIAN PRE-QUALIFICATION PROFILE</div>' +
+      '<div class="t3">HR + CREDENTIALING &nbsp;·&nbsp; INTERNAL REVIEW</div></div>' +
+      '<div class="pq-sub">Texas physician staffing &nbsp;|&nbsp; Preliminary screening before full credentialing</div>';
+
+    // Identity block
+    h += '<div class="pq-id"><div class="pq-photo"><div>PROFESSIONAL<br>HEADSHOT</div>' +
+      (p.headshot ? '<div style="color:var(--st-good,#047857)">☑ ON FILE</div>' : '<div>[ NOT ON FILE ]</div>') + '</div>' +
+      '<div style="display:grid;gap:9px">' +
+      fld("Physician name", p.name) +
+      fld("Primary specialty", p.specialty || NT, !p.specialty) +
+      fld("State", "TEXAS") +
+      fld("Email", p.email || NT, !p.email) +
+      '</div><div style="display:grid;gap:9px">' +
+      fld("Credentials / degree", NT, true) +
+      fld("Profile ID", p.entityKey) +
+      fld("Phone", NT, true) +
+      fld("Current employer / group", NT, true) +
+      '</div></div>';
+
+    // Board certification
+    h += '<div class="pq-h">Required board certification — at least one must be verified</div>' +
+      '<div class="pq-row">' + p.boards.map(b => pqBox(b.on, b.label)).join("") +
+      pqBox(!!p.other, "OTHER: " + (p.other || "__________")) + '</div>' +
+      (p.lapsed ? '<div class="pq-sub" style="margin:8px 0 0;color:var(--st-expired,#b91c1c)">Roster records this board certification as <b>' + esc(p.bcode) + '</b> — treated as not verified.</div>'
+        : (!p.boardVerified ? '<div class="pq-sub" style="margin:8px 0 0;color:var(--st-expired,#b91c1c)">No board certification recorded on the roster' + (p.bcode ? ' (column reads "' + esc(p.bcode) + '")' : '') + '.</div>' : ''));
+
+    // Screening table
+    h += '<div class="pq-h">Primary-source and background screening</div><div class="pq-wrap">' +
+      '<table class="pq-t"><thead><tr><th>Check</th><th>Verification source</th><th>Status</th><th>Detail</th></tr></thead><tbody>';
+    p.screen.forEach(r => {
+      h += '<tr' + (r.state.ok ? "" : ' class="bad"') + '><td class="c">' + esc(r.spec.check) + '</td>' +
+        '<td class="s">' + esc(r.spec.source) + '</td>' +
+        '<td>' + (r.state.ok
+          ? '<span class="pq-st s-' + (r.state.key === "ok" ? "good" : r.state.key) + '">☑ ' + esc(r.state.label || r.spec.ok) + '</span>'
+          : '<span class="pq-st ' + (r.state.key === "expired" ? "s-expired" : "none") + '">☐ ' + esc(r.state.label) + '</span>') + '</td>' +
+        '<td class="s">' + esc(r.detail) + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+
+    // Life-support certifications
+    h += '<div class="pq-h">Life-support &amp; trauma certifications</div><div class="pq-row">' +
+      p.certs.map(c => '<span class="pq-box' + (c.current ? " on" : "") + '">' + (c.current ? "☑" : "☐") + " " + esc(c.label) +
+        ' &nbsp;' + (c.current ? "CURRENT" : (c.it ? "EXPIRED" : "MISSING")) + ' &nbsp;<span style="font-weight:600;opacity:.75">Exp: ' + esc(c.exp) + '</span></span>').join("") +
+      '</div>';
+
+    // Summary + decision
+    const dOk = p.decision === "GREEN - ADVANCE", dBad = p.decision === "DOES NOT MEET CRITERIA";
+    h += '<div class="pq-h">Credentialing summary &amp; pre-qualification decision</div>' +
+      '<div style="display:grid;gap:7px">' +
+      pqBox(p.summary.allScreenOk, "All required checks green / verified / clear") +
+      pqBox(p.summary.boardVerified, "At least one required board certification verified") +
+      pqBox(p.summary.certsCurrent, "Required certifications current or renewal plan documented") +
+      '</div>' +
+      '<div class="pq-dec"><div class="k" style="font-size:9.5px;font-weight:800;letter-spacing:.08em;color:var(--ink-3,#94a3b8);text-transform:uppercase">Pre-qualification decision</div>' +
+      '<div class="pq-row" style="margin-top:7px">' +
+      pqBox(dOk, "GREEN - ADVANCE") + pqBox(!dOk && !dBad, "HOLD / FOLLOW-UP") + pqBox(dBad, "DOES NOT MEET CRITERIA") +
+      '</div><div class="pq-sub" style="margin:9px 0 0">Suggested from the tracked roster data only. A reviewer confirms and signs off below — this is not an automatic determination.</div></div>';
+
+    // Reviewer + notes (left blank for the human, as on the form)
+    h += '<div class="pq-h">Reviewer</div><div class="pq-cols2">' +
+      fld("Reviewer name / title", "—", true) + fld("Review date", "—", true) + '</div>' +
+      '<div class="pq-h">Notes / outstanding items</div><div class="pq-note">' +
+      esc(pqOutstanding(p).join("\n") || "—") + '</div></div>';
+
+    const head = '<button class="icon-btn" id="pfPrint" style="padding:5px 10px">\u{1F5A8} Print</button>';
+    openModal("Pre-Qualification Profile — " + esc(name), h, head);
     const pb = $("#pfPrint"); if (pb) pb.onclick = () => printProfile(entityKey, name);
   }
+
+  // Auto-fill the "outstanding items" box with what is actually missing, so the reviewer starts
+  // from a real list instead of a blank line.
+  function pqOutstanding(p) {
+    const out = [];
+    p.screen.forEach(r => { if (!r.state.ok) out.push(r.spec.check + " — " + r.state.label.toLowerCase() + " (" + r.spec.source + ")"); });
+    if (!p.boardVerified) out.push("Board certification not verified" + (p.bcode ? " (roster reads \"" + p.bcode + "\")" : ""));
+    p.certs.forEach(c => { if (!c.current) out.push(c.label + (c.it ? " expired " + c.exp : " not on file")); });
+    if (!p.headshot) out.push("Headshot for badge not on file");
+    if (!p.email) out.push("No email address on the roster");
+    return out;
+  }
+
   function printProfile(entityKey, name) {
-    const rows = profileRows(entityKey);
-    const done = rows.filter(r => r.complete).length;
-    let sec = "", n = 0, tr = "";
-    rows.forEach(r => {
-      if (r.section !== sec) { sec = r.section; tr += '<tr><td colspan="6" style="background:#eef2f7;font-weight:bold">' + esc(sec) + '</td></tr>'; }
-      n++;
-      const primary = r.docPart || r.verify;
-      const exp = primary && primary.expires ? fmtD(primary.expires) : (primary && primary.permanent ? "Permanent" : "—");
-      const docTxt = (!r.spec.doc && !r.spec.find) ? "n/a"
-        : (r.docPart ? (r.docPart.isFile ? ("On file" + (r.viaOther ? " (combined document)" : "")) : (r.docPart.docStatus || "Missing")) : "Not on file");
-      const verTxt = !r.spec.verify ? "n/a" : (r.verify ? ((r.verify.expires ? "Verified — next due " + fmtD(r.verify.expires) : "Verified") + (r.spec.by ? " (" + r.spec.by + ")" : "")) : "Not run");
-      const stTxt = r.tracked && r.status ? (r.status.label + (r.statusFrom ? " (" + r.statusFrom + ")" : "")) : "Not on file";
-      tr += '<tr><td>' + n + '</td><td>' + esc(r.spec.label) + '</td><td>' + esc(docTxt) + '</td><td>' + esc(verTxt) + '</td><td>' + esc(exp) + '</td><td>' + esc(stTxt) + '</td></tr>';
-    });
+    const p = pqProfile(entityKey);
+    const box = (on, t) => (on ? "[X] " : "[ ] ") + t;
+    const rows = p.screen.map(r =>
+      '<tr><td>' + esc(r.spec.check) + '</td><td>' + esc(r.spec.source) + '</td><td>' +
+      esc(r.state.ok ? box(true, r.state.label || r.spec.ok) : box(false, r.state.label)) + '</td><td>' + esc(r.detail) + '</td></tr>').join("");
     const pa = $("#printArea");
-    pa.innerHTML = '<div class="binder"><h1>' + esc(name) + '</h1>' +
-      '<div class="bsub">Provider credentialing profile · Sentinel / WCGTX · ' + done + ' of ' + rows.length + ' requirements complete · printed ' + new Date().toLocaleDateString() + '</div>' +
-      '<table class="btable"><thead><tr><th>#</th><th>Requirement</th><th>Document</th><th>Verified / run</th><th>Expires</th><th>Status</th></tr></thead><tbody>' + tr + '</tbody></table>' +
-      '<div class="bfoot">“Verified / run” is the primary-source check with the issuing authority, separate from the document itself. Generated by Sentinel Compliance Command Center.</div></div>';
+    pa.innerHTML = '<div class="binder">' +
+      '<h1>' + esc(p.name) + '</h1>' +
+      '<div class="bsub">WCGTX Physician Pre-Qualification Profile &middot; HR + Credentialing internal review &middot; Texas physician staffing &middot; printed ' + new Date().toLocaleDateString() + '</div>' +
+      '<table class="btable"><tbody>' +
+      '<tr><td><b>Physician name</b></td><td>' + esc(p.name) + '</td><td><b>Profile ID</b></td><td>' + esc(p.entityKey) + '</td></tr>' +
+      '<tr><td><b>Primary specialty</b></td><td>' + esc(p.specialty || "not tracked") + '</td><td><b>State</b></td><td>TEXAS</td></tr>' +
+      '<tr><td><b>Email</b></td><td>' + esc(p.email || "not tracked") + '</td><td><b>Headshot</b></td><td>' + (p.headshot ? "On file" : "Not on file") + '</td></tr>' +
+      '<tr><td><b>Credentials / degree</b></td><td>not tracked</td><td><b>Phone</b></td><td>not tracked</td></tr>' +
+      '<tr><td><b>Current employer / group</b></td><td colspan="3">not tracked</td></tr>' +
+      '</tbody></table>' +
+      '<h2 style="font-size:12pt;margin:14px 0 6px">Required board certification</h2>' +
+      '<div>' + p.boards.map(b => box(b.on, b.label)).join(" &nbsp; ") + " &nbsp; " + box(!!p.other, "OTHER: " + (p.other || "__________")) + '</div>' +
+      '<h2 style="font-size:12pt;margin:14px 0 6px">Primary-source and background screening</h2>' +
+      '<table class="btable"><thead><tr><th>Check</th><th>Verification source</th><th>Status</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<h2 style="font-size:12pt;margin:14px 0 6px">Life-support &amp; trauma certifications</h2>' +
+      '<div>' + p.certs.map(c => box(c.current, c.label + " " + (c.current ? "CURRENT" : (c.it ? "EXPIRED" : "MISSING")) + " — Exp: " + c.exp)).join(" &nbsp; ") + '</div>' +
+      '<h2 style="font-size:12pt;margin:14px 0 6px">Credentialing summary &amp; pre-qualification decision</h2>' +
+      '<div>' + box(p.summary.allScreenOk, "All required checks green / verified / clear") + '<br>' +
+      box(p.summary.boardVerified, "At least one required board certification verified") + '<br>' +
+      box(p.summary.certsCurrent, "Required certifications current or renewal plan documented") + '</div>' +
+      '<div style="margin-top:10px"><b>Pre-qualification decision:</b> ' +
+      box(p.decision === "GREEN - ADVANCE", "GREEN - ADVANCE") + " &nbsp; " +
+      box(p.decision === "HOLD / FOLLOW-UP", "HOLD / FOLLOW-UP") + " &nbsp; " +
+      box(p.decision === "DOES NOT MEET CRITERIA", "DOES NOT MEET CRITERIA") +
+      '<div style="font-size:9pt;margin-top:4px">Suggested from tracked roster data only; the reviewer below confirms.</div></div>' +
+      '<h2 style="font-size:12pt;margin:14px 0 6px">Notes / outstanding items</h2>' +
+      '<div style="white-space:pre-wrap;font-size:10pt">' + esc(pqOutstanding(p).join("\n") || "—") + '</div>' +
+      '<table class="btable" style="margin-top:14px"><tbody><tr><td><b>Reviewer name / title</b></td><td>__________________________</td>' +
+      '<td><b>Review date</b></td><td>______________</td></tr></tbody></table>' +
+      '<div class="bfoot">Generated by Sentinel Compliance Command Center from the WCGTX master roster.</div></div>';
     document.body.classList.add("printing");
     window.print();
     setTimeout(() => document.body.classList.remove("printing"), 400);
   }
-
   // ---- Onboarding status board (per new-hire process checklist, saved to OneDrive) ----
   var ONBOARD_STEPS = [
     ["welcome", "Welcome letter sent"],
@@ -1326,7 +1402,15 @@
       '<div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">' +
       '<button class="btn-primary" id="stDiag" style="flex:1;min-width:130px">Check only</button>' +
       '<button class="btn-primary" id="stFull" style="flex:1;min-width:130px;background:#b45309">Full test</button>' +
-      '</div><div id="stOut" style="margin-top:14px"></div>';
+      '</div>' +
+      // Trace one name through Excel -> baked data -> cache -> dashboard, so "I can't see Dr X"
+      // gets a specific answer instead of guesswork.
+      '<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--hair,#e2e8f0)">' +
+      '<div style="font-weight:700;font-size:13px;margin-bottom:6px">Find a provider</div>' +
+      '<div class="item-sub" style="margin-bottom:8px">Type a surname to see whether they are in the master Excel, and why they may not be showing.</div>' +
+      '<div style="display:flex;gap:8px"><input id="stWho" placeholder="e.g. Crespo" style="flex:1;padding:8px 10px;border:1px solid var(--hair,#e2e8f0);border-radius:8px;font-size:13px">' +
+      '<button class="btn-primary" id="stWhoGo" style="min-width:96px">Look up</button></div></div>' +
+      '<div id="stOut" style="margin-top:14px"></div>';
     // openModal takes an HTML string and returns the live #modalInner node — query from that,
     // not from a detached element, or the buttons below would never be wired up.
     const body = openModal("System check", html);
@@ -1359,6 +1443,27 @@
         out.innerHTML = '<div style="color:#b91c1c;font-size:13px">Could not run: ' + esc(String(e.message || e)) + '</div>';
       });
     };
+    const lookup = () => {
+      const q = (body.querySelector("#stWho").value || "").trim();
+      if (q.length < 2) { toast("Type at least 2 letters."); return; }
+      out.innerHTML = '<div class="item-sub">Looking up “' + esc(q) + '” in the master Excel…</div>';
+      fetch("/api/data?whois=" + encodeURIComponent(q)).then(r => r.json()).then(d => {
+        if (d.error) { out.innerHTML = '<div style="color:#b91c1c;font-size:13px">' + esc(d.error) + '</div>'; return; }
+        const list = (arr, label) => arr && arr.length
+          ? '<div class="pf-sub"><b>' + label + ':</b> ' + arr.map(x => esc((x.first ? x.first + " " : "") + x.last + " (row " + x.row + ")")).join(", ") + '</div>'
+          : '<div class="pf-sub pf-dim">' + label + ': none</div>';
+        out.innerHTML =
+          '<div style="padding:11px 13px;border-radius:9px;background:var(--bg,#f1f5f9);font-size:13px;font-weight:650;margin-bottom:10px">' + esc(d.verdict) + '</div>' +
+          '<div style="font-size:12px;line-height:1.7">' +
+          list(d.liveRoster && d.liveRoster.credentialsSheet, "In “WCGTX Credentials” (active)") +
+          list(d.liveRoster && d.liveRoster.inactiveSheet, "In “Inactive Providers”") +
+          '<div class="pf-sub"><b>Visible on the dashboard:</b> ' + ((d.visibleOnDashboard || []).length ? esc(d.visibleOnDashboard.join(", ")) : "no") + '</div>' +
+          '<div class="pf-sub pf-dim">Workbook totals: ' + ((d.counts && d.counts.liveActive) || 0) + ' active, ' + ((d.counts && d.counts.liveInactive) || 0) + ' inactive · cache built ' + esc((d.inCachedDelta && d.inCachedDelta.deltaGeneratedAt) || "never") + '</div>' +
+          '</div>';
+      }).catch(e => { out.innerHTML = '<div style="color:#b91c1c;font-size:13px">Lookup failed: ' + esc(String(e.message || e)) + '</div>'; });
+    };
+    body.querySelector("#stWhoGo").onclick = lookup;
+    body.querySelector("#stWho").onkeydown = (e) => { if (e.key === "Enter") lookup(); };
     body.querySelector("#stDiag").onclick = () => run("diagnose");
     body.querySelector("#stFull").onclick = () => {
       if (!confirm("Full test will add a test provider called \"Sentinel ZZSelftest\", verify it in Excel and OneDrive, then delete it.\n\nThe workbook is backed up first. Make sure the master Excel file is closed.\n\nRun it?")) return;

@@ -85,6 +85,67 @@ module.exports = async (req, res) => {
   //                       folder -> verify both are gone. Self-cleaning: it removes everything
   //                       it created, and it snapshots the workbook first. Uses a fixed test
   //                       name (no timestamp) so a half-finished run is cleaned up by the next.
+  // ---- "Why can't I see this provider?" ------------------------------------------------------
+  // GET/POST /api/data?whois=<name>   (admin) — traces one name through every stage:
+  //   live Excel (Credentials / Inactive)  ->  baked data.json  ->  cached delta  ->  dashboard.
+  // Answers the actual question, instead of leaving the user to guess which stage dropped them.
+  const whois = url.searchParams.get("whois");
+  if (whois) {
+    if (!s || !s.admin) { res.status(403).json({ error: "admins only" }); return; }
+    const q = String(whois).trim().toLowerCase();
+    if (q.length < 2) { res.status(400).json({ error: "give at least 2 characters" }); return; }
+    try {
+      const xl = require("../lib/excel");
+      const G = require("../lib/graph");
+      const token = await G.accessToken();
+      const slug = (l, f) => (l + "-" + (f || "")).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+      const rowsOf = async (sheet) => {
+        const sh = await xl.readSheet(token, sheet);
+        const n = xl.detectNameCols((sh.values || [])[0] || []);
+        return (sh.values || []).slice(1).map((r, i) => ({
+          row: i + 2,
+          last: String(r[n.lastIdx] == null ? "" : r[n.lastIdx]).replace(/[\*,()]+/g, "").trim(),
+          first: String(r[n.firstIdx] == null ? "" : r[n.firstIdx]).trim(),
+        })).filter(x => x.last);
+      };
+      const [actRows, inactRows] = await Promise.all([rowsOf(xl.SHEET_ACTIVE), rowsOf(xl.SHEET_INACTIVE)]);
+      const match = arr => arr.filter(x => (x.first + " " + x.last).toLowerCase().includes(q) || (x.last + " " + x.first).toLowerCase().includes(q) || x.last.toLowerCase().includes(q));
+      const inActive = match(actRows), inInactive = match(inactRows);
+
+      const baked = (data.items || []).filter(i => i.scope === "provider");
+      const bakedHit = [...new Set(baked.filter(i => String(i.entity || "").toLowerCase().includes(q) || String(i.entityKey || "").includes(q.replace(/[^a-z0-9]+/g, "-"))).map(i => i.entityKey))];
+
+      let delta = null; try { delta = await G.readJsonAt(token, G.drivePath("_Sentinel/roster_delta.json")); } catch (e) {}
+      const dNew = ((delta && delta.newProviders) || []).filter(p => ((p.first || "") + " " + (p.last || "")).toLowerCase().includes(q) || String(p.last || "").toLowerCase().includes(q));
+      const { applyRosterDelta } = require("../lib/delta");
+      const merged = await applyRosterDelta(baked);
+      const visible = [...new Set(merged.filter(i => i.scope === "provider" && String(i.entity || "").toLowerCase().includes(q)).map(i => i.entityKey + (i.active === false ? " (inactive)" : "")))];
+
+      // Plain-English verdict.
+      let verdict;
+      if (!inActive.length && !inInactive.length) {
+        verdict = "NOT IN THE MASTER EXCEL. The dashboard only ever shows people who are in the roster workbook, so this provider has to be added first — use '+ Add provider', which also creates their OneDrive folder.";
+      } else if (inInactive.length && !inActive.length) {
+        verdict = "In the roster but on the 'Inactive Providers' sheet. Inactive people are hidden until you tick 'Show inactive' on the Providers tab.";
+      } else if (visible.length) {
+        verdict = "Present and visible on the dashboard.";
+      } else if (dNew.length) {
+        verdict = "In the active roster and in the cached delta, but not rendering. Click 'Sync from Excel' once, then reload.";
+      } else {
+        verdict = "In the active roster but NOT in the cached delta, so the dashboard has not picked them up yet. Click 'Sync from Excel' once — that rebuilds the cache from the workbook.";
+      }
+      res.status(200).json({
+        query: whois, verdict,
+        liveRoster: { credentialsSheet: inActive, inactiveSheet: inInactive },
+        inBakedData: bakedHit,
+        inCachedDelta: { newProviders: dNew, deltaGeneratedAt: (delta && delta.generatedAt) || null },
+        visibleOnDashboard: visible,
+        counts: { liveActive: actRows.length, liveInactive: inactRows.length, bakedProviders: new Set(baked.map(i => i.entityKey)).size },
+      });
+      return;
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); return; }
+  }
+
   const selftest = url.searchParams.get("selftest");
   if (selftest) {
     if (!s || !s.admin) { res.status(403).json({ error: "admins only" }); return; }
@@ -149,6 +210,22 @@ module.exports = async (req, res) => {
         if (r && r.ok) staffOk++;
       }
       step("Staff workbooks reachable", staffOk === 2, staffOk + " of 2 RN/FD workbooks found");
+
+      // --- Every provider in the live roster should be visible on the dashboard ---------------
+      // This is the "I can't see Dr X" check, done for the whole roster at once.
+      const slugP = (l, f) => (l + "-" + (f || "")).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+      const bakedProv = (data.items || []).filter(i => i.scope === "provider");
+      const { applyRosterDelta: merge } = require("../lib/delta");
+      const mergedProv = await merge(bakedProv);
+      const visibleKeys = new Set(mergedProv.filter(i => i.scope === "provider").map(i => i.entityKey));
+      const liveKeys = parsed.map(p => ({ key: slugP(p.last, p.first), name: (p.first ? p.first + " " : "") + p.last }));
+      const notShowing = liveKeys.filter(k => !visibleKeys.has(k.key));
+      step("Every active roster provider is on the dashboard", notShowing.length === 0,
+        notShowing.length === 0
+          ? parsed.length + " active providers in the workbook, all present on the dashboard"
+          : notShowing.length + " of " + parsed.length + " are in the workbook but NOT on the dashboard: " +
+            notShowing.slice(0, 20).map(k => k.name).join(", ") + (notShowing.length > 20 ? " …" : "") +
+            "  — click 'Sync from Excel' once; if they still don't appear, use 'Find a provider' for the reason.");
 
       if (selftest !== "full") {
         const passed = steps.filter(x => x.pass).length;
