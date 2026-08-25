@@ -85,6 +85,204 @@ module.exports = async (req, res) => {
   //                       folder -> verify both are gone. Self-cleaning: it removes everything
   //                       it created, and it snapshots the workbook first. Uses a fixed test
   //                       name (no timestamp) so a half-finished run is cleaned up by the next.
+  // ---- Read contact details out of a provider's own documents --------------------------------
+  // POST /api/data?contact=<entityKey>   (admin)
+  // The roster carries no phone number anywhere, and only ~half the providers have an email on
+  // the COI sheet, so the remaining details only exist inside their CV / application PDFs.
+  // Text is extracted IN THIS FUNCTION with pdf-parse — deliberately NOT via the third-party OCR
+  // service, because these are personnel documents and that service is on a shared public key.
+  // Scanned (image-only) PDFs yield no text; that is reported rather than guessed at.
+  const contactKey = url.searchParams.get("contact");
+  if (contactKey) {
+    if (!s || !s.admin) { res.status(403).json({ error: "admins only" }); return; }
+    try {
+      const G = require("../lib/graph");
+      const { applyRosterDelta } = require("../lib/delta");
+      const all = await applyRosterDelta((data.items || []).filter(i => i.scope === "provider"));
+      const mine = all.filter(i => i.entityKey === contactKey);
+      if (!mine.length) { res.status(404).json({ error: "unknown provider" }); return; }
+
+      // Prefer the documents most likely to carry contact details, best first.
+      const fname = it => { try { return decodeURIComponent(String(it.fileLink || "").split("/").pop() || ""); } catch (e) { return ""; } };
+      const rank = it => {
+        const t = ((it.category || "") + " " + fname(it)).toLowerCase();
+        if (/\bcv\b|resume|curriculum/.test(t)) return 0;
+        if (/initial app|application/.test(t)) return 1;
+        if (/tsca|peer|reference/.test(t)) return 2;
+        return 3;
+      };
+      const cands = mine.filter(i => i.isFile && /\.pdf(\?|#|$)/i.test(String(i.fileLink || "")))
+        .sort((a, b) => rank(a) - rank(b)).slice(0, 4);
+      if (!cands.length) { res.status(200).json({ ok: false, message: "No PDF documents on file to read." }); return; }
+
+      const token = await G.accessToken();
+      const pdf = require("pdf-parse");
+      const found = { emails: [], phones: [], degree: "", from: [], scanned: [] };
+      for (const it of cands) {
+        try {
+          const shareId = "u!" + Buffer.from(it.fileLink, "utf8").toString("base64").replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
+          const di = await fetch(G.GRAPH + "/shares/" + shareId + "/driveItem", { headers: { Authorization: "Bearer " + token } });
+          if (!di.ok) continue;
+          const item = await di.json();
+          const dl = item["@microsoft.graph.downloadUrl"] || item["@content.downloadUrl"];
+          if (!dl) continue;
+          const fr = await fetch(dl);
+          if (!fr.ok) continue;
+          const buf = Buffer.from(await fr.arrayBuffer());
+          if (buf.length > 12 * 1024 * 1024) continue;                 // skip very large scans
+          const parsed = await pdf(buf).catch(() => null);
+          const text = (parsed && parsed.text) || "";
+          const label = fname(it) || it.category;
+          if (text.replace(/\s/g, "").length < 40) { found.scanned.push(label); continue; }
+          found.from.push(label);
+          (text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) || []).forEach(e => {
+            const v = e.toLowerCase().replace(/[.,;:]+$/, "");
+            // Ignore the practice's own addresses — we want the provider's.
+            if (!/wcgtx\.com$|example\.|noreply|no-reply/.test(v) && found.emails.indexOf(v) < 0) found.emails.push(v);
+          });
+          // US phone numbers, tolerant of (214) 555-1234 / 214.555.1234 / +1 214 555 1234.
+          (text.match(/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g) || []).forEach(raw => {
+            const d = raw.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+            if (d.length !== 10) return;
+            if (/^(\d)\1{9}$/.test(d)) return;                         // 0000000000 etc
+            if (/^(19|20)\d{8}$/.test(d)) return;                      // date-like runs
+            const pretty = "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6);
+            if (found.phones.indexOf(pretty) < 0) found.phones.push(pretty);
+          });
+          if (!found.degree) {
+            const m = text.match(/\b(M\.?D\.?|D\.?O\.?|P\.?A\.?-?C?|N\.?P\.?|MBBS)\b/);
+            if (m) found.degree = m[1].replace(/\./g, "").toUpperCase();
+          }
+        } catch (fe) { /* one unreadable document must not stop the rest */ }
+      }
+      res.status(200).json({
+        ok: true, entityKey: contactKey,
+        emails: found.emails.slice(0, 5), phones: found.phones.slice(0, 5), degree: found.degree || "",
+        readFrom: found.from, unreadable: found.scanned,
+        note: found.from.length
+          ? "Read from the documents listed. Please eyeball these before relying on them — a CV can contain a reference's or employer's number as well as the provider's."
+          : "No text could be extracted. These PDFs are most likely scans (images), which this cannot read.",
+      });
+      return;
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); return; }
+  }
+
+  // ---- Import existing documents into a provider's Sentinel folder ---------------------------
+  // Providers often already have a document folder somewhere else on the drive, outside the
+  // Sentinel/Provider tree the dashboard reads. This copies those files in, so they get picked
+  // up, without anyone hand-dragging them in OneDrive.
+  //   GET  ?import=preview&src=<folder link>&entityKey=<key>   -> what WOULD be copied
+  //   POST ?import=run&src=<folder link>&entityKey=<key>&phase=<0-5>
+  // Always a COPY — never a move or delete. The originals are left exactly where they are.
+  const imp = url.searchParams.get("import");
+  if (imp) {
+    if (!s || !s.admin) { res.status(403).json({ error: "admins only" }); return; }
+    const PHASES = [
+      "1. Application & Document Collection", "2. Primary Source Verification",
+      "3. Background & Compliance Review", "4. Medical Staff Review",
+      "5. Payer Enrollment & Facility Setup", "6. Approval & Ongoing Monitoring",
+    ];
+    try {
+      const G = require("../lib/graph");
+      const token = await G.accessToken();
+      const src = String(url.searchParams.get("src") || "").trim();
+      const entityKey = String(url.searchParams.get("entityKey") || "").trim();
+      let provName = String(url.searchParams.get("name") || "").trim();
+      const phaseIdx = Math.min(5, Math.max(0, parseInt(url.searchParams.get("phase") || "0", 10) || 0));
+      if (!src) { res.status(400).json({ error: "paste the folder's OneDrive/SharePoint link" }); return; }
+
+      // Work out the provider's display name (folder names use "First Last").
+      if (!provName && entityKey) {
+        const { applyRosterDelta } = require("../lib/delta");
+        const all = await applyRosterDelta((data.items || []).filter(i => i.scope === "provider"));
+        const hit = all.find(i => i.entityKey === entityKey);
+        if (hit) provName = hit.entity;
+      }
+      if (!provName) { res.status(400).json({ error: "could not work out which provider to import into" }); return; }
+      // Folder names come from spreadsheet content, so strip anything path-significant.
+      const safeName = provName.replace(/[\/\\:*?"<>|]/g, "").replace(/\s+/g, " ").trim();
+
+      // Resolve the source. Accepts a share link ("...:f:/p/...") or a plain SharePoint URL.
+      const shareId = "u!" + Buffer.from(src, "utf8").toString("base64").replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
+      const sr = await fetch(G.GRAPH + "/shares/" + shareId + "/driveItem?$select=id,name,folder,file,parentReference,webUrl",
+        { headers: { Authorization: "Bearer " + token } });
+      if (!sr.ok) {
+        res.status(502).json({ error: "Could not open that link (HTTP " + sr.status + "). Make sure it is a link to the FOLDER and that it is shared with the Sentinel app.", detail: (await sr.text()).slice(0, 200) });
+        return;
+      }
+      const srcItem = await sr.json();
+      const srcDrive = srcItem.parentReference && srcItem.parentReference.driveId;
+      if (!srcItem.folder) { res.status(400).json({ error: "That link points at a file, not a folder. Share the folder that holds the documents." }); return; }
+
+      // List the files in it (one level of subfolders too — documents are often filed in one).
+      const listChildren = async (driveId, itemId) => {
+        const out = [];
+        let u = G.GRAPH + "/drives/" + driveId + "/items/" + itemId + "/children?$select=id,name,file,folder,size&$top=200";
+        while (u) {
+          const r = await fetch(u, { headers: { Authorization: "Bearer " + token } });
+          if (!r.ok) break;
+          const j = await r.json();
+          (j.value || []).forEach(x => out.push(x));
+          u = j["@odata.nextLink"] || null;
+        }
+        return out;
+      };
+      const top = await listChildren(srcDrive, srcItem.id);
+      const files = top.filter(x => x.file).map(x => ({ id: x.id, name: x.name, size: x.size, from: srcItem.name }));
+      for (const sub of top.filter(x => x.folder).slice(0, 12)) {
+        const kids = await listChildren(srcDrive, sub.id);
+        kids.filter(x => x.file).forEach(x => files.push({ id: x.id, name: x.name, size: x.size, from: srcItem.name + "/" + sub.name }));
+      }
+
+      const destPath = "Sama Farooqui/Sentinel/Provider/" + safeName + "/" + PHASES[phaseIdx];
+      if (imp === "preview") {
+        res.status(200).json({
+          ok: true, mode: "preview", provider: safeName, source: srcItem.name, sourceUrl: srcItem.webUrl,
+          destination: destPath, phase: PHASES[phaseIdx], fileCount: files.length,
+          files: files.slice(0, 100).map(f => ({ name: f.name, kb: Math.round((f.size || 0) / 1024), from: f.from })),
+          note: "Nothing has been copied yet. These files will be COPIED — the originals stay where they are.",
+        });
+        return;
+      }
+      if (imp !== "run") { res.status(400).json({ error: "import must be preview or run" }); return; }
+      if (!files.length) { res.status(400).json({ error: "no files found in that folder" }); return; }
+
+      // Make sure the provider's Sentinel folder + all 6 phase subfolders exist.
+      const base = "Sama Farooqui/Sentinel/Provider/" + safeName;
+      await G.ensureFolderIn(token, G.docsRoot(), base);
+      for (const p of PHASES) { try { await G.ensureFolderIn(token, G.docsRoot(), base + "/" + p); } catch (e) {} }
+
+      // Destination folder id, needed as the copy target.
+      const dr = await fetch(G.docsRoot() + "/root:/" + G.encPath(destPath) + "?$select=id,parentReference", { headers: { Authorization: "Bearer " + token } });
+      if (!dr.ok) { res.status(500).json({ error: "could not open the destination folder after creating it (HTTP " + dr.status + ")" }); return; }
+      const destItem = await dr.json();
+
+      // Copy each file. Graph copy is asynchronous and returns 202 — we record acceptance and let
+      // it finish server-side rather than holding the request open (and risking a timeout).
+      const results = [];
+      for (const f of files.slice(0, 60)) {
+        const r = await fetch(G.GRAPH + "/drives/" + srcDrive + "/items/" + f.id + "/copy", {
+          method: "POST",
+          headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            parentReference: { driveId: G.DOCS_DRIVE_ID, id: destItem.id },
+            name: f.name,
+            "@microsoft.graph.conflictBehavior": "rename",
+          }),
+        });
+        results.push({ name: f.name, ok: r.status === 202 || r.ok, status: r.status, error: (r.status === 202 || r.ok) ? undefined : (await r.text()).slice(0, 160) });
+      }
+      const started = results.filter(r => r.ok).length;
+      res.status(200).json({
+        ok: started > 0, mode: "run", provider: safeName, destination: destPath,
+        started, failed: results.length - started, skipped: Math.max(0, files.length - 60),
+        results,
+        note: "Copies run in the background on Microsoft's side and usually land within a minute. The originals were NOT moved or deleted. Click 'Sync from Excel', then reopen the provider.",
+      });
+      return;
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); return; }
+  }
+
   // ---- "Why can't I see this provider?" ------------------------------------------------------
   // GET/POST /api/data?whois=<name>   (admin) — traces one name through every stage:
   //   live Excel (Credentials / Inactive)  ->  baked data.json  ->  cached delta  ->  dashboard.

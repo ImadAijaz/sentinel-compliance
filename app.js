@@ -961,12 +961,13 @@
       '<div class="ent-info"><div class="ent-nm">' + esc(name) + '</div><div class="ent-meta">' + items.length + ' tracked items</div></div>' +
       '<div class="ent-actions">' + (isProv
         ? '<button class="icon-btn" data-a="profile" title="Full credentialing profile in one table">👤 Profile</button><button class="icon-btn" data-a="pemail">✉ Email provider</button><button class="icon-btn" data-a="portal">🔗 Portal</button><button class="icon-btn" data-a="binder">🗂 Binder</button>' +
-          (isAdmin() ? '<button class="icon-btn" data-a="inact" title="Move to Inactive Providers (keeps the row, marks inactive)">📦 Mark inactive</button><button class="icon-btn danger" data-a="delprov" title="Permanently delete from the roster (recoverable from Recycle bin)">🗑 Delete</button>' : "")
+          (isAdmin() ? '<button class="icon-btn" data-a="import" title="Copy documents from another OneDrive folder into this provider&#39;s Sentinel folder">📥 Import documents</button><button class="icon-btn" data-a="inact" title="Move to Inactive Providers (keeps the row, marks inactive)">📦 Mark inactive</button><button class="icon-btn danger" data-a="delprov" title="Permanently delete from the roster (recoverable from Recycle bin)">🗑 Delete</button>' : "")
         : '<button class="icon-btn" data-a="email">✉ Email</button><button class="icon-btn" data-a="binder">🗂 Binder</button>') +
       ((tab === "provider" || tab === "staff") ? '<button class="icon-btn" data-a="onboard">📋 Onboarding</button>' : '') + '</div>';
     const it0 = items[0] || {};
     const bind = (a, fn) => { const b = wrap.querySelector('[data-a="' + a + '"]'); if (b) b.onclick = fn; };
     bind("profile", () => openProviderProfile(it0.entityKey, name));
+    bind("import", () => openImportDocs(it0.entityKey, name));
     bind("pemail", () => openEmailTemplate(it0));
     bind("portal", () => openProviderPortal(it0.entityKey, name));
     bind("binder", () => printBinder(name));
@@ -1158,6 +1159,9 @@
     return {
       entityKey, name, mine, by, screen, certs, boards, other, boardVerified, bcode, lapsed, specialty,
       email: (mine.find(i => i.email) || {}).email || "",
+      // Degree/title comes from the COI Roster sheet's Title column (the Credentials sheet has
+      // no such field). Phone is in no sheet at all — it can only come from the documents.
+      degree: (mine.find(i => i.providerTitle) || {}).providerTitle || "",
       headshot: findDoc(/photo|headshot|badge/i),
       summary: { allScreenOk, boardVerified, certsCurrent },
       decision,
@@ -1184,11 +1188,15 @@
       fld("State", "TEXAS") +
       fld("Email", p.email || NT, !p.email) +
       '</div><div style="display:grid;gap:9px">' +
-      fld("Credentials / degree", NT, true) +
+      fld("Credentials / degree", p.degree || NT, !p.degree) +
       fld("Profile ID", p.entityKey) +
-      fld("Phone", NT, true) +
+      '<div class="pq-f" id="pqPhoneCell"><div class="k">Phone</div><div class="v na">' + NT + '</div></div>' +
       fld("Current employer / group", NT, true) +
-      '</div></div>';
+      '</div></div>' +
+      // Phone is in no sheet, and only about half the providers have an email on the COI sheet.
+      // Offer to read the provider's own PDFs for the rest — on demand, not automatically.
+      '<div style="margin-top:9px"><button class="icon-btn" id="pqReadDocs" style="padding:5px 10px">🔍 Read phone / email from their documents</button>' +
+      '<span id="pqReadMsg" class="pf-sub pf-dim" style="margin-left:9px"></span></div>';
 
     // Board certification
     h += '<div class="pq-h">Required board certification — at least one must be verified</div>' +
@@ -1238,6 +1246,30 @@
     const head = '<button class="icon-btn" id="pfPrint" style="padding:5px 10px">\u{1F5A8} Print</button>';
     openModal("Pre-Qualification Profile — " + esc(name), h, head);
     const pb = $("#pfPrint"); if (pb) pb.onclick = () => printProfile(entityKey, name);
+    const rd = $("#pqReadDocs");
+    if (rd) rd.onclick = () => {
+      const msg = $("#pqReadMsg");
+      rd.disabled = true; msg.textContent = "Reading their PDFs…";
+      fetch("/api/data?contact=" + encodeURIComponent(entityKey), { method: "POST" })
+        .then(r => r.json()).then(d => {
+          rd.disabled = false;
+          if (d.error) { msg.textContent = d.error; return; }
+          const cell = $("#pqPhoneCell");
+          if (d.phones && d.phones.length && cell) {
+            cell.innerHTML = '<div class="k">Phone</div><div class="v">' + esc(d.phones[0]) + '</div>' +
+              (d.phones.length > 1 ? '<div class="pf-sub pf-dim">also found: ' + esc(d.phones.slice(1).join(", ")) + '</div>' : "") +
+              '<div class="pf-sub pf-dim">from ' + esc((d.readFrom || []).join(", ")) + '</div>';
+          }
+          const bits = [];
+          if (d.phones && d.phones.length) bits.push(d.phones.length + " phone number" + (d.phones.length > 1 ? "s" : ""));
+          if (d.emails && d.emails.length) bits.push(d.emails.length + " email" + (d.emails.length > 1 ? "s" : "") + " (" + esc(d.emails[0]) + ")");
+          if (d.degree) bits.push("degree " + esc(d.degree));
+          msg.innerHTML = bits.length
+            ? esc("Found " + bits.join(", ") + ". ") + '<span style="color:var(--st-due,#854d0e)">Check before relying on it — a CV can list a reference’s number too.</span>'
+            : esc(d.note || "Nothing found.") + ((d.unreadable || []).length ? esc(" Unreadable (likely scans): " + d.unreadable.join(", ")) : "");
+        })
+        .catch(e => { rd.disabled = false; msg.textContent = String(e.message || e); });
+    };
   }
 
   // Auto-fill the "outstanding items" box with what is actually missing, so the reviewer starts
@@ -1266,7 +1298,7 @@
       '<tr><td><b>Physician name</b></td><td>' + esc(p.name) + '</td><td><b>Profile ID</b></td><td>' + esc(p.entityKey) + '</td></tr>' +
       '<tr><td><b>Primary specialty</b></td><td>' + esc(p.specialty || "not tracked") + '</td><td><b>State</b></td><td>TEXAS</td></tr>' +
       '<tr><td><b>Email</b></td><td>' + esc(p.email || "not tracked") + '</td><td><b>Headshot</b></td><td>' + (p.headshot ? "On file" : "Not on file") + '</td></tr>' +
-      '<tr><td><b>Credentials / degree</b></td><td>not tracked</td><td><b>Phone</b></td><td>not tracked</td></tr>' +
+      '<tr><td><b>Credentials / degree</b></td><td>' + esc(p.degree || "not tracked") + '</td><td><b>Phone</b></td><td>not in the roster</td></tr>' +
       '<tr><td><b>Current employer / group</b></td><td colspan="3">not tracked</td></tr>' +
       '</tbody></table>' +
       '<h2 style="font-size:12pt;margin:14px 0 6px">Required board certification</h2>' +
@@ -1293,6 +1325,77 @@
     window.print();
     setTimeout(() => document.body.classList.remove("printing"), 400);
   }
+  // ---- Import existing documents into a provider's Sentinel folder --------------------------
+  // For providers whose paperwork already lives somewhere else on the drive. Preview first, then
+  // copy — the originals are never moved or deleted.
+  const IMPORT_PHASES = [
+    "1. Application & Document Collection", "2. Primary Source Verification",
+    "3. Background & Compliance Review", "4. Medical Staff Review",
+    "5. Payer Enrollment & Facility Setup", "6. Approval & Ongoing Monitoring",
+  ];
+  function openImportDocs(entityKey, name) {
+    if (!isAdmin()) { toast("Admins only."); return; }
+    const html =
+      '<div class="item-sub" style="margin-bottom:12px">Copies documents from another OneDrive / SharePoint folder into ' +
+      '<b>' + esc(name) + '</b>&rsquo;s Sentinel folder, so the dashboard can see them. ' +
+      'The originals are <b>copied, not moved</b> — nothing is deleted.</div>' +
+      '<div style="font-size:12px;font-weight:700;margin-bottom:5px">1. Paste the folder link</div>' +
+      '<div class="item-sub" style="margin-bottom:6px">In OneDrive, open the folder that holds the documents, click <b>Share</b> → <b>Copy link</b>, and paste it here.</div>' +
+      '<input id="impSrc" placeholder="https://wcgtx-my.sharepoint.com/:f:/p/..." style="width:100%;padding:8px 10px;border:1px solid var(--hair,#e2e8f0);border-radius:8px;font-size:12.5px;box-sizing:border-box">' +
+      '<div style="font-size:12px;font-weight:700;margin:12px 0 5px">2. Which section should they go in?</div>' +
+      '<select id="impPhase" style="width:100%;padding:8px 10px;border:1px solid var(--hair,#e2e8f0);border-radius:8px;font-size:12.5px;box-sizing:border-box">' +
+      IMPORT_PHASES.map((p, i) => '<option value="' + i + '">' + esc(p) + '</option>').join("") + '</select>' +
+      '<div style="display:flex;gap:8px;margin-top:14px">' +
+      '<button class="btn-primary" id="impPrev" style="flex:1">Preview</button>' +
+      '<button class="btn-primary" id="impRun" style="flex:1;background:#b45309" disabled>Copy files</button></div>' +
+      '<div id="impOut" style="margin-top:14px"></div>';
+    const body = openModal("Import documents — " + esc(name), html);
+    const out = body.querySelector("#impOut");
+    const srcEl = body.querySelector("#impSrc"), phEl = body.querySelector("#impPhase");
+    const prevBtn = body.querySelector("#impPrev"), runBtn = body.querySelector("#impRun");
+    const qs = (mode) => "/api/data?import=" + mode + "&src=" + encodeURIComponent(srcEl.value.trim()) +
+      "&entityKey=" + encodeURIComponent(entityKey) + "&name=" + encodeURIComponent(name) +
+      "&phase=" + encodeURIComponent(phEl.value);
+
+    prevBtn.onclick = () => {
+      if (!srcEl.value.trim()) { toast("Paste the folder link first."); return; }
+      prevBtn.disabled = true; runBtn.disabled = true;
+      out.innerHTML = '<div class="item-sub">Opening that folder…</div>';
+      fetch(qs("preview")).then(r => r.json()).then(d => {
+        prevBtn.disabled = false;
+        if (d.error) { out.innerHTML = '<div style="color:#b91c1c;font-size:12.5px">' + esc(d.error) + '</div>'; return; }
+        runBtn.disabled = !d.fileCount;
+        out.innerHTML =
+          '<div style="padding:10px 12px;border-radius:8px;background:var(--bg,#f1f5f9);font-size:12.5px;margin-bottom:9px">' +
+          '<b>' + d.fileCount + ' file' + (d.fileCount === 1 ? "" : "s") + '</b> found in “' + esc(d.source) + '”.<br>' +
+          'They will be copied to:<br><span style="font-family:monospace;font-size:11px">' + esc(d.destination) + '</span></div>' +
+          (d.fileCount ? '<div style="max-height:210px;overflow:auto;font-size:11.5px;line-height:1.75">' +
+            d.files.map(f => '<div>· ' + esc(f.name) + ' <span class="pf-dim">(' + f.kb + ' KB)</span></div>').join("") +
+            (d.fileCount > d.files.length ? '<div class="pf-dim">…and ' + (d.fileCount - d.files.length) + ' more</div>' : "") +
+            '</div>' : '<div class="item-sub">Nothing to copy — is that the right folder?</div>') +
+          '<div class="item-sub" style="margin-top:8px">' + esc(d.note || "") + '</div>';
+      }).catch(e => { prevBtn.disabled = false; out.innerHTML = '<div style="color:#b91c1c;font-size:12.5px">' + esc(String(e.message || e)) + '</div>'; });
+    };
+
+    runBtn.onclick = () => {
+      if (!confirm('Copy these files into ' + name + '\'s Sentinel folder?\n\nThe originals stay exactly where they are — this only makes copies.')) return;
+      prevBtn.disabled = true; runBtn.disabled = true;
+      out.innerHTML = '<div class="item-sub">Copying…</div>';
+      fetch(qs("run"), { method: "POST" }).then(r => r.json()).then(d => {
+        prevBtn.disabled = false;
+        if (d.error) { out.innerHTML = '<div style="color:#b91c1c;font-size:12.5px">' + esc(d.error) + '</div>'; return; }
+        const bad = (d.results || []).filter(r => !r.ok);
+        out.innerHTML =
+          '<div style="padding:10px 12px;border-radius:8px;font-size:12.5px;background:' + (d.failed ? "#fef2f7" : "#ecfdf5") + ';color:' + (d.failed ? "#991b1b" : "#065f46") + '">' +
+          '<b>' + d.started + ' file' + (d.started === 1 ? "" : "s") + ' copying</b>' +
+          (d.failed ? ' · ' + d.failed + ' failed' : "") + (d.skipped ? ' · ' + d.skipped + ' skipped (60 per run)' : "") + '</div>' +
+          (bad.length ? '<div style="margin-top:8px;font-size:11.5px;line-height:1.7">' + bad.slice(0, 10).map(r => '<div>· ' + esc(r.name) + ' — ' + esc(r.error || ("HTTP " + r.status)) + '</div>').join("") + '</div>' : "") +
+          '<div class="item-sub" style="margin-top:9px">' + esc(d.note || "") + '</div>';
+        if (d.started) toast("✓ " + d.started + " file(s) copying to " + name + "'s folder.");
+      }).catch(e => { prevBtn.disabled = false; out.innerHTML = '<div style="color:#b91c1c;font-size:12.5px">' + esc(String(e.message || e)) + '</div>'; });
+    };
+  }
+
   // ---- Onboarding status board (per new-hire process checklist, saved to OneDrive) ----
   var ONBOARD_STEPS = [
     ["welcome", "Welcome letter sent"],
