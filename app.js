@@ -1114,9 +1114,11 @@
     const boardVerified = boards.some(b => b.on) || !!other;
     // Only the three mapped boards name a specialty. Any other code (ABS, ABOG, ABPN…) is shown
     // as the board itself rather than dressed up as a specialty we haven't actually established.
-    const specialty = boards.find(b => b.on)
+    // A saved specialty wins — a new provider has no Board Certified value on the roster yet, so
+    // the derived one would be blank even when the documents make it obvious.
+    const specialty = saved.specialty || (boards.find(b => b.on)
       ? boards.find(b => b.on).label.replace(/\b\w+/g, w => w[0] + w.slice(1).toLowerCase())
-      : (other ? "Board: " + other : "");
+      : (other ? "Board: " + other : ""));
 
     const screen = PQ_SCREEN.map(spec => {
       const vIt = spec.verify ? (by[spec.verify] || null) : null;
@@ -1191,6 +1193,7 @@
       // no such field). Phone is in no sheet at all — it can only come from the documents.
       degree: saved.degree || (mine.find(i => i.providerTitle) || {}).providerTitle || "",
       phone: saved.phone || "",
+      license: saved.license || "",
       employer: saved.employer || "",
       reviewer: saved.reviewer || "",
       reviewDate: saved.reviewDate || "",
@@ -1220,8 +1223,8 @@
       (p.headshot ? '<div style="color:var(--st-good,#047857)">☑ ON FILE</div>' : '<div>[ NOT ON FILE ]</div>') + '</div>' +
       '<div style="display:grid;gap:9px">' +
       fld("Physician name", p.name) +
-      fld("Primary specialty", p.specialty || NT, !p.specialty) +
-      fld("State", "TEXAS") +
+      inp("Primary specialty", "pqSpecialty", p.specialty, "not recorded") +
+      inp("Texas licence no.", "pqLicense", p.license, "not recorded") +
       inp("Email", "pqEmail", p.email, "none on file") +
       '</div><div style="display:grid;gap:9px">' +
       inp("Credentials / degree", "pqDegree", p.degree, "e.g. MD") +
@@ -1298,13 +1301,14 @@
       OVERLAY.profiles = OVERLAY.profiles || {};
       const rec = {
         email: val("pqEmail"), degree: val("pqDegree"), phone: val("pqPhone"),
+        specialty: val("pqSpecialty"), license: val("pqLicense"),
         employer: val("pqEmployer"), reviewer: val("pqReviewer"),
         reviewDate: val("pqReviewDate"), notes: $("#pqNotes") ? $("#pqNotes").value : "",
         updatedAt: new Date().toISOString(),
         updatedBy: (window.SENTINEL_AUTH && window.SENTINEL_AUTH.email) || (CURRENT_USER && CURRENT_USER.label) || "",
       };
       // Drop the record entirely when every field is blank, so an untouched profile leaves nothing.
-      const any = ["email", "degree", "phone", "employer", "reviewer", "reviewDate", "notes"].some(k => rec[k]);
+      const any = ["email", "degree", "phone", "specialty", "license", "employer", "reviewer", "reviewDate", "notes"].some(k => rec[k]);
       if (any) OVERLAY.profiles[entityKey] = rec; else delete OVERLAY.profiles[entityKey];
       saveOverlay();
       const m = $("#pqSaveMsg");
@@ -1326,15 +1330,20 @@
           const phones = d.phones || [], emails = d.emails || [];
           // Fill the blanks automatically, but never overwrite something already there.
           const setIfEmpty = (id, v) => { const e = $("#" + id); if (e && !e.value.trim() && v) { e.value = v; return true; } return false; };
+          const licenses = d.licenses || [], specialties = d.specialties || [];
           setIfEmpty("pqPhone", phones[0]);
           setIfEmpty("pqEmail", emails[0]);
           setIfEmpty("pqDegree", d.degree);
-          if (!phones.length && !emails.length && !d.degree) {
+          setIfEmpty("pqLicense", licenses[0]);
+          // Only auto-fill the specialty when the CV names exactly ONE — a CV that mentions
+          // several is listing rotations and past posts, and picking the first would be a guess.
+          if (specialties.length === 1) setIfEmpty("pqSpecialty", specialties[0]);
+          if (!phones.length && !emails.length && !d.degree && !licenses.length && !specialties.length) {
             msg.textContent = d.note || "Nothing found.";
             if ((d.unreadable || []).length) cands.innerHTML = '<div class="pf-sub pf-dim" style="margin-top:7px">Could not read (likely scans): ' + esc(d.unreadable.join(", ")) + '</div>';
             return;
           }
-          msg.innerHTML = '<span style="color:var(--st-due,#854d0e)">Check these before relying on them — a CV can list a reference’s number too.</span>';
+          msg.innerHTML = '<span style="color:var(--st-due,#854d0e)">Check these before relying on them — a CV lists training and past posts, so a number or specialty in it may not be the provider’s own.</span>';
           // Every candidate as a chip: one click puts it in the field. Far clearer than a
           // run-on "also found:" sentence.
           const group = (label, items, target) => items.length
@@ -1345,6 +1354,9 @@
           cands.innerHTML =
             group("Phone numbers found", phones, "pqPhone") +
             group("Email addresses found", emails, "pqEmail") +
+            group("Texas licence numbers found", licenses, "pqLicense") +
+            group(specialties.length > 1 ? "Specialties mentioned (pick the right one)" : "Specialty found", specialties, "pqSpecialty") +
+            group("NPI found", d.npi || [], "pqLicense") +
             (d.degree ? group("Degree", [d.degree], "pqDegree") : "") +
             ((d.readFrom || []).length ? '<div class="pq-cand" style="margin-top:8px">' +
               d.readFrom.map(f => '<span class="pq-chip src">from ' + esc(f) + '</span>').join("") + '</div>' : "") +
@@ -1381,8 +1393,9 @@
       '<div class="bsub">WCGTX Physician Profile &middot; HR + Credentialing internal review &middot; Texas physician staffing &middot; printed ' + new Date().toLocaleDateString() + '</div>' +
       '<table class="btable"><tbody>' +
       '<tr><td><b>Physician name</b></td><td>' + esc(p.name) + '</td><td><b>Profile ID</b></td><td>' + esc(p.entityKey) + '</td></tr>' +
-      '<tr><td><b>Primary specialty</b></td><td>' + esc(p.specialty || "not tracked") + '</td><td><b>State</b></td><td>TEXAS</td></tr>' +
-      '<tr><td><b>Email</b></td><td>' + esc(p.email || "not tracked") + '</td><td><b>Headshot</b></td><td>' + (p.headshot ? "On file" : "Not on file") + '</td></tr>' +
+      '<tr><td><b>Primary specialty</b></td><td>' + esc(p.specialty || "not tracked") + '</td><td><b>Texas licence no.</b></td><td>' + esc(p.license || "not recorded") + '</td></tr>' +
+      '<tr><td><b>State</b></td><td>TEXAS</td><td><b>Headshot</b></td><td>' + (p.headshot ? "On file" : "Not on file") + '</td></tr>' +
+      '<tr><td><b>Email</b></td><td colspan="3">' + esc(p.email || "not tracked") + '</td></tr>' +
       '<tr><td><b>Credentials / degree</b></td><td>' + esc(p.degree || "not tracked") + '</td><td><b>Phone</b></td><td>' + esc(p.phone || "not recorded") + '</td></tr>' +
       '<tr><td><b>Current employer / group</b></td><td colspan="3">' + esc(p.employer || "not recorded") + '</td></tr>' +
       '</tbody></table>' +
