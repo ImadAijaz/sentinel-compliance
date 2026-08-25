@@ -799,10 +799,11 @@
       head.innerHTML = (state.selectMode ? '<input type="checkbox" class="row-check grp-check" title="Select all items in this group">' : "") +
         '<div class="avatar" style="' + (isProvider ? "" : "background:linear-gradient(135deg,#6366f1,#4f46e5)") + '">' + (isProvider ? esc(initials) : '<svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">' + ICONS.building + '</svg>') + '</div>' +
         '<div><div class="g-name"><span style="opacity:.55">' + (gi + 1) + '.</span> ' + esc(name) + testTag + inactiveTag + rosterNote + '</div><div class="g-meta">' + items.length + ' tracked items · health ' + gs.score + '</div></div>' +
-        '<div class="mini-stats">' + miniRing(gs.score) + pills + (isProvider ? '<button class="icon-btn pemail-btn" title="Email this provider (to their email)" style="padding:5px 10px">✉ Email provider</button><button class="icon-btn portal-btn" title="Provider self-service portal (QR / link)" style="padding:5px 10px">🔗 Portal</button><button class="icon-btn binder-btn" title="Print survey-ready binder" style="padding:5px 10px">🗂 Binder</button>' : '<button class="icon-btn gemail-btn" title="Email me this group\'s report" style="padding:5px 10px">✉ Email</button>') + '<span class="worst-dot bg-' + worst + '"></span></div>' +
+        '<div class="mini-stats">' + miniRing(gs.score) + pills + (isProvider ? '<button class="icon-btn profile-btn" title="Full credentialing profile in one table" style="padding:5px 10px">👤 Profile</button><button class="icon-btn pemail-btn" title="Email this provider (to their email)" style="padding:5px 10px">✉ Email provider</button><button class="icon-btn portal-btn" title="Provider self-service portal (QR / link)" style="padding:5px 10px">🔗 Portal</button><button class="icon-btn binder-btn" title="Print survey-ready binder" style="padding:5px 10px">🗂 Binder</button>' : '<button class="icon-btn gemail-btn" title="Email me this group\'s report" style="padding:5px 10px">✉ Email</button>') + '<span class="worst-dot bg-' + worst + '"></span></div>' +
         '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:20px;height:20px"><path d="M9 6l6 6-6 6"/></svg>';
       head.onclick = () => { state.openGroups[name] = !open; renderContent(); };
       g.appendChild(head);
+      const prb = head.querySelector(".profile-btn"); if (prb) prb.onclick = (e) => { e.stopPropagation(); openProviderProfile(items[0].entityKey, name); };
       const bb = head.querySelector(".binder-btn"); if (bb) bb.onclick = (e) => { e.stopPropagation(); printBinder(name); };
       const pb = head.querySelector(".portal-btn"); if (pb) pb.onclick = (e) => { e.stopPropagation(); openProviderPortal(items[0].entityKey, name); };
       const peb = head.querySelector(".pemail-btn"); if (peb) peb.onclick = (e) => { e.stopPropagation(); openEmailTemplate(items[0]); };
@@ -949,12 +950,13 @@
     wrap.innerHTML = '<div class="ent-ic">' + (isProv ? esc(initials(name)) : '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" style="width:20px;height:20px">' + ICONS.building + '</svg>') + '</div>' +
       '<div class="ent-info"><div class="ent-nm">' + esc(name) + '</div><div class="ent-meta">' + items.length + ' tracked items</div></div>' +
       '<div class="ent-actions">' + (isProv
-        ? '<button class="icon-btn" data-a="pemail">✉ Email provider</button><button class="icon-btn" data-a="portal">🔗 Portal</button><button class="icon-btn" data-a="binder">🗂 Binder</button>' +
+        ? '<button class="icon-btn" data-a="profile" title="Full credentialing profile in one table">👤 Profile</button><button class="icon-btn" data-a="pemail">✉ Email provider</button><button class="icon-btn" data-a="portal">🔗 Portal</button><button class="icon-btn" data-a="binder">🗂 Binder</button>' +
           (isAdmin() ? '<button class="icon-btn" data-a="inact" title="Move to Inactive Providers (keeps the row, marks inactive)">📦 Mark inactive</button><button class="icon-btn danger" data-a="delprov" title="Permanently delete from the roster (recoverable from Recycle bin)">🗑 Delete</button>' : "")
         : '<button class="icon-btn" data-a="email">✉ Email</button><button class="icon-btn" data-a="binder">🗂 Binder</button>') +
       ((tab === "provider" || tab === "staff") ? '<button class="icon-btn" data-a="onboard">📋 Onboarding</button>' : '') + '</div>';
     const it0 = items[0] || {};
     const bind = (a, fn) => { const b = wrap.querySelector('[data-a="' + a + '"]'); if (b) b.onclick = fn; };
+    bind("profile", () => openProviderProfile(it0.entityKey, name));
     bind("pemail", () => openEmailTemplate(it0));
     bind("portal", () => openProviderPortal(it0.entityKey, name));
     bind("binder", () => printBinder(name));
@@ -964,6 +966,247 @@
     bind("onboard", () => openOnboarding(it0.entityKey, name));
     return wrap;
   }
+  // ================= PROVIDER PROFILE =================
+  // One page that answers "where does this doctor stand?" in a single table.
+  //
+  // The requested checklist mixed two kinds of thing: primary-source VERIFICATIONS ("DEA is
+  // verified with the DEA", "Medical License is verified with the Texas Medical Board") and
+  // DOCUMENTS ("DEA Certificate", "Texas Medical License Certificate"). DEA and Medical License
+  // appeared in both lists. They are not the same requirement — holding the certificate and
+  // having verified it with the issuing authority are separate credentialing steps — so instead
+  // of listing them twice, each is ONE row with a Document column and a Verified column. That's
+  // the de-duplication: 2 rows instead of 4, with nothing lost.
+  //
+  // Rows marked `find` have no dedicated roster column (Social Security Card, Residency, Photo).
+  // Rather than hide them, we look for a matching file among the provider's scanned documents,
+  // so a real gap shows as a gap instead of silently not existing.
+  const PROFILE_SPEC = [
+    ["License & registration", [
+      { label: "Texas Medical License", doc: "State Medical License", verify: "Medical License Verify (annual)", by: "Texas Medical Board" },
+      { label: "DEA Registration", doc: "Individual DEA Registration", verify: "DEA Verify (annual)", by: "DEA — Diversion Control Division" },
+    ]],
+    ["Primary-source checks", [
+      { label: "NPDB Query", verify: "NPDB Query (2 yrs)", by: "NPDB", note: "run every 2 years" },
+      { label: "OIG / SAM Exclusion Check", verify: "OIG / SAM Exclusion Check", by: "OIG / SAM", note: "run annually" },
+      { label: "NPI Verification", verify: "NPI Verification", by: "NPI Registry" },
+    ]],
+    ["Sent for completion / signature", [
+      { label: "Professional Peer References", doc: "Peer References", note: "sent to referees" },
+      { label: "Delineation of Privileges (DOP)", doc: "Delineation of Privileges (DOP)", note: "sent for signatures" },
+    ]],
+    ["Certifications", [
+      { label: "ACLS Certification", doc: "ACLS Certification", find: /\bacls\b/i },
+      { label: "ATLS Certification", doc: "ATLS Certification", find: /\batls\b/i },
+      { label: "PALS Certification", doc: "PALS Certification", find: /\bpals\b/i },
+      { label: "BLS Certification", doc: "BLS Certification", find: /\bbls\b/i },
+      { label: "Board Certification Letter", doc: "Board Certification", note: "if applicable", find: /board|recert|\b(abem|abfm|abim|abps|aobem|aobim|aboem|abog|abpn|abs|abucm)\b/i },
+    ]],
+    ["Identity & education", [
+      { label: "Driver License", doc: "Driver's License" },
+      { label: "Social Security Card", find: /social\s*security|\bssn\b|\bss\s*card\b/i },
+      { label: "Diploma and/or ECFMG", doc: "Medical Diploma" },
+      { label: "Residency", find: /residency|\bpgy\b|good standing/i },
+      { label: "Photo (headshot for badge)", find: /photo|headshot|badge/i },
+    ]],
+    ["Health", [
+      { label: "Recent Flu Documentation", doc: "Influenza Vaccination", find: /\bflu\b|influenza/i },
+      { label: "Recent TB Skin Test", doc: "TB Screening", note: "or CXR / questionnaire", find: /\btb\b|ppd|tubercul|quantiferon|\bcxr\b/i },
+    ]],
+    ["Training & file", [
+      { label: "CV / Resume", doc: "CV / Resume", find: /\bcv\b|resume|curriculum/i },
+      { label: "CME — past 2 years, min 20 hrs", doc: "CME (20 hrs / 2 yrs)", find: /\bcme\b/i },
+      { label: "TSCA Documents", doc: "TSCA Documents", note: "signed within 90 days" },
+      { label: "Certificate of Liability Insurance", doc: "Malpractice / COI Insurance", note: "or provider completes an application" },
+      { label: "Complete Onboarding Packet", doc: "Initial Application" },
+    ]],
+  ];
+  // Worst-first ranking, so a row's overall status reflects its weakest part.
+  const PF_RANK = { expired: 0, pending: 1, critical: 2, due: 3, recurring: 3, good: 4, permanent: 5 };
+  function pfFileName(it) {
+    if (it.uploadName) return it.uploadName;
+    try { return decodeURIComponent(String(it.fileLink || "").split("/").pop() || ""); } catch (e) { return String(it.fileLink || ""); }
+  }
+  // Resolve the whole spec against one provider's tracked items.
+  function profileRows(entityKey) {
+    const mine = DATA.filter(i => i.scope === "provider" && i.entityKey === entityKey);
+    const byCat = {};
+    // Prefer an item that actually has a document or a date over an empty placeholder.
+    mine.forEach(i => {
+      const prev = byCat[i.category];
+      if (!prev) { byCat[i.category] = i; return; }
+      const score = x => (x.isFile ? 2 : 0) + (x.expires ? 1 : 0);
+      if (score(i) > score(prev)) byCat[i.category] = i;
+    });
+    const out = [];
+    PROFILE_SPEC.forEach(([section, rows]) => {
+      rows.forEach(spec => {
+        const doc = spec.doc ? (byCat[spec.doc] || null) : null;
+        const verify = spec.verify ? (byCat[spec.verify] || null) : null;
+        // Filename fallback. Fires in two situations:
+        //  1. The requirement has no dedicated roster column at all (Social Security Card,
+        //     Residency, Photo) — the only way to know is to look at the actual documents.
+        //  2. The requirement HAS a column but no file attached to it, while a document that
+        //     covers it exists elsewhere. This is common and real: one card named
+        //     "ACLS & BLS_02_20_2028.pdf" proves both, but the scan can only attach a file to a
+        //     single credential, so BLS would otherwise read "Missing" when the proof is on file.
+        // Requires isFile — we are looking for actual proof, not another empty placeholder.
+        const needsFallback = !doc || !doc.isFile;
+        const found = (spec.find && needsFallback)
+          ? (mine.find(i => i.isFile && (spec.find.test(i.category || "") || spec.find.test(pfFileName(i)))) || null)
+          : null;
+        // Which item actually represents "the document" for this row: the tracked one when it
+        // has a file, otherwise whatever the filename fallback turned up. Using the fallback
+        // matters for the status too — an empty placeholder would otherwise drag the row down to
+        // "Action needed" while the real proof sits in a combined document.
+        const docPart = (doc && doc.isFile) ? doc : (found || doc);
+        const viaOther = !!(found && docPart === found && doc);
+        const parts = [docPart, verify].filter(Boolean);
+        // Worst-of across the row's parts, remembering WHICH part is the weak one. Without that
+        // a row could read "Expired" while the Expires column showed a future date — true but
+        // baffling, because the lapsed thing was the annual verification, not the certificate.
+        let status = null, statusFrom = "";
+        const consider = (p, srcLabel) => {
+          if (!p) return;
+          const st = computeStatus(p);
+          if (!status || PF_RANK[st.key] < PF_RANK[status.key]) { status = st; statusFrom = srcLabel; }
+        };
+        consider(docPart, "certificate");
+        consider(verify, "verification");
+        // "Complete" = every part this row needs is present, has a document where a document is
+        // expected, and isn't expired.
+        let complete = false;
+        if (parts.length) {
+          // A document requirement counts as met by the tracked file OR by a document found
+          // elsewhere that covers it.
+          const docOk = !(spec.doc || spec.find) || !!(docPart && (docPart.isFile || docPart.docStatus));
+          const verOk = !spec.verify || !!(verify && (verify.expires || verify.isFile || verify.permanent));
+          complete = docOk && verOk && !!status && status.key !== "expired" && status.key !== "pending";
+        }
+        // Only worth naming the source when the row actually has two things that can disagree.
+        const showFrom = !!(docPart && verify) && status && status.key !== "good" && status.key !== "permanent";
+        out.push({ section, spec, doc, verify, found, docPart, viaOther, status, statusFrom: showFrom ? statusFrom : "", complete, tracked: parts.length > 0 });
+      });
+    });
+    return out;
+  }
+  function pfBadge(st, from) {
+    if (!st) return '<span class="pf-b pf-none">Not on file</span>';
+    return '<span class="pf-b s-' + st.key + '">' + esc(st.label) + (st.days != null ? " · " + countdownText(st) : "") + '</span>' +
+      (from ? '<div class="pf-sub pf-dim">' + esc(from) + '</div>' : "");
+  }
+  function pfDocCell(it, expected, viaOther) {
+    if (!expected) return '<span class="pf-dim">n/a</span>';
+    if (!it) return '<span class="pf-b pf-none">Not on file</span>';
+    if (it.isFile) {
+      const n = pfFileName(it);
+      return '<span class="pf-yes">✓ On file</span>' +
+        (n ? '<div class="pf-sub">' + esc(n.length > 46 ? n.slice(0, 46) + "…" : n) + '</div>' : "") +
+        // Say so when the proof lives in another credential's document (a combined card), so the
+        // row isn't read as "we have a dedicated file for this".
+        (viaOther ? '<div class="pf-sub pf-dim">covered by this combined document</div>' : "");
+    }
+    if (it.docStatus) return '<span class="pf-yes">✓ ' + esc(it.docStatus) + '</span>';
+    return '<span class="pf-b pf-none">Missing</span>';
+  }
+  function pfVerCell(it, spec) {
+    if (!spec.verify) return '<span class="pf-dim">n/a</span>';
+    if (!it) return '<span class="pf-b pf-none">Not run</span>';
+    const st = computeStatus(it);
+    const when = it.expires ? fmtD(it.expires) : (it.docStatus || (it.isFile ? "On file" : ""));
+    const ok = st.key !== "expired" && st.key !== "pending";
+    return (ok ? '<span class="pf-yes">✓ Verified</span>' : '<span class="pf-b s-' + st.key + '">' + esc(st.label) + '</span>') +
+      (when ? '<div class="pf-sub">' + (it.expires ? "next due " : "") + esc(when) + '</div>' : "") +
+      (spec.by ? '<div class="pf-sub pf-dim">with ' + esc(spec.by) + '</div>' : "");
+  }
+  function pfStyles() {
+    if ($("#pfStyles")) return;
+    const s = document.createElement("style"); s.id = "pfStyles";
+    s.textContent =
+      '.pf-table{width:100%;border-collapse:collapse;font-size:12.5px}' +
+      '.pf-table th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-3,#94a3b8);font-weight:700;padding:8px 10px;border-bottom:1px solid var(--hair,#e2e8f0)}' +
+      '.pf-table td{padding:9px 10px;border-bottom:1px solid var(--hair,#eef2f7);vertical-align:top}' +
+      '.pf-table tr.pf-sec td{background:var(--bg,#f1f5f9);font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-2,#475569);padding:7px 10px}' +
+      '.pf-table tr.pf-bad td{background:var(--st-expired-bg,rgba(220,38,38,.05))}' +
+      '.pf-yes{color:var(--st-good,#047857);font-weight:800}' +
+      '.pf-n{color:var(--ink-3,#94a3b8);font-variant-numeric:tabular-nums;width:26px}' +
+      '.pf-item{font-weight:650;color:var(--ink,#0f172a)}' +
+      '.pf-sub{font-size:11px;color:var(--ink-2,#64748b);margin-top:2px;word-break:break-word}' +
+      '.pf-dim{color:var(--ink-3,#94a3b8)}' +
+      // The status colours come from the app's own .s-expired/.s-critical/... palette in
+      // styles.css (which is theme-aware), so this only sets the badge SHAPE — never its colour.
+      // border-width/style only — never border-color, or this later rule would override the
+      // colour the .s-* palette sets (this <style> is appended after styles.css).
+      '.pf-b{display:inline-block;padding:3px 8px;border-radius:999px;font-size:10.5px;font-weight:800;' +
+      'white-space:nowrap;border-width:1px;border-style:solid;text-transform:uppercase;letter-spacing:.3px}' +
+      '.pf-b.pf-none{color:var(--ink-2,#64748b);background:var(--bg,#f1f5f9);border-color:var(--hair,#e2e8f0)}' +
+      '.pf-sum{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}' +
+      '.pf-kpi{flex:1;min-width:104px;border:1px solid var(--hair,#e2e8f0);border-radius:10px;padding:9px 11px;background:var(--surface-solid,#fff)}' +
+      '.pf-kpi b{display:block;font-size:19px;line-height:1.15}' +
+      '.pf-kpi span{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-2,#64748b);font-weight:700}' +
+      '.pf-wrap{overflow-x:auto}';
+    document.head.appendChild(s);
+  }
+  function openProviderProfile(entityKey, name) {
+    pfStyles();
+    const rows = profileRows(entityKey);
+    const total = rows.length;
+    const done = rows.filter(r => r.complete).length;
+    const expired = rows.filter(r => r.status && r.status.key === "expired").length;
+    const missing = rows.filter(r => !r.tracked).length;
+    const pct = Math.round(100 * done / (total || 1));
+    let body = '<div class="pf-sum">' +
+      '<div class="pf-kpi"><b>' + done + " / " + total + '</b><span>Complete</span></div>' +
+      '<div class="pf-kpi"><b style="color:' + (expired ? "#b91c1c" : "inherit") + '">' + expired + '</b><span>Expired</span></div>' +
+      '<div class="pf-kpi"><b style="color:' + (missing ? "#b45309" : "inherit") + '">' + missing + '</b><span>Nothing on file</span></div>' +
+      '<div class="pf-kpi"><b>' + pct + '%</b><span>Overall</span></div></div>' +
+      '<div class="ent-bar" style="height:8px;margin-bottom:14px"><i style="display:block;height:100%;border-radius:999px;background:var(--accent);width:' + pct + '%"></i></div>' +
+      '<div class="pf-wrap"><table class="pf-table"><thead><tr><th></th><th>Requirement</th><th>Document</th><th>Verified / run</th><th>Expires</th><th>Status</th></tr></thead><tbody>';
+    let sec = "", n = 0;
+    rows.forEach(r => {
+      if (r.section !== sec) { sec = r.section; body += '<tr class="pf-sec"><td colspan="6">' + esc(sec) + '</td></tr>'; }
+      n++;
+      const primary = r.docPart || r.verify;
+      const exp = primary && primary.expires ? fmtD(primary.expires) : (primary && primary.permanent ? "Permanent" : "—");
+      const bad = !r.tracked || (r.status && r.status.key === "expired");
+      body += '<tr' + (bad ? ' class="pf-bad"' : '') + '>' +
+        '<td class="pf-n">' + n + '</td>' +
+        '<td><div class="pf-item">' + esc(r.spec.label) + '</div>' + (r.spec.note ? '<div class="pf-sub pf-dim">' + esc(r.spec.note) + '</div>' : '') + '</td>' +
+        '<td>' + (r.spec.verify && !r.spec.doc ? '<span class="pf-dim">n/a</span>' : pfDocCell(r.docPart, !!(r.spec.doc || r.spec.find), r.viaOther)) + '</td>' +
+        '<td>' + pfVerCell(r.verify, r.spec) + '</td>' +
+        '<td>' + esc(exp) + '</td>' +
+        '<td>' + pfBadge(r.tracked ? r.status : null, r.statusFrom) + '</td></tr>';
+    });
+    body += '</tbody></table></div>' +
+      '<div class="item-sub" style="margin-top:12px">“Verified / run” is the primary-source check with the issuing authority — separate from holding the certificate, which is the Document column. Rows shaded red are expired or have nothing on file.</div>';
+    const head = '<button class="icon-btn" id="pfPrint" style="padding:5px 10px">🖨 Print</button>';
+    openModal("Profile — " + esc(name), body, head);
+    const pb = $("#pfPrint"); if (pb) pb.onclick = () => printProfile(entityKey, name);
+  }
+  function printProfile(entityKey, name) {
+    const rows = profileRows(entityKey);
+    const done = rows.filter(r => r.complete).length;
+    let sec = "", n = 0, tr = "";
+    rows.forEach(r => {
+      if (r.section !== sec) { sec = r.section; tr += '<tr><td colspan="6" style="background:#eef2f7;font-weight:bold">' + esc(sec) + '</td></tr>'; }
+      n++;
+      const primary = r.docPart || r.verify;
+      const exp = primary && primary.expires ? fmtD(primary.expires) : (primary && primary.permanent ? "Permanent" : "—");
+      const docTxt = (!r.spec.doc && !r.spec.find) ? "n/a"
+        : (r.docPart ? (r.docPart.isFile ? ("On file" + (r.viaOther ? " (combined document)" : "")) : (r.docPart.docStatus || "Missing")) : "Not on file");
+      const verTxt = !r.spec.verify ? "n/a" : (r.verify ? ((r.verify.expires ? "Verified — next due " + fmtD(r.verify.expires) : "Verified") + (r.spec.by ? " (" + r.spec.by + ")" : "")) : "Not run");
+      const stTxt = r.tracked && r.status ? (r.status.label + (r.statusFrom ? " (" + r.statusFrom + ")" : "")) : "Not on file";
+      tr += '<tr><td>' + n + '</td><td>' + esc(r.spec.label) + '</td><td>' + esc(docTxt) + '</td><td>' + esc(verTxt) + '</td><td>' + esc(exp) + '</td><td>' + esc(stTxt) + '</td></tr>';
+    });
+    const pa = $("#printArea");
+    pa.innerHTML = '<div class="binder"><h1>' + esc(name) + '</h1>' +
+      '<div class="bsub">Provider credentialing profile · Sentinel / WCGTX · ' + done + ' of ' + rows.length + ' requirements complete · printed ' + new Date().toLocaleDateString() + '</div>' +
+      '<table class="btable"><thead><tr><th>#</th><th>Requirement</th><th>Document</th><th>Verified / run</th><th>Expires</th><th>Status</th></tr></thead><tbody>' + tr + '</tbody></table>' +
+      '<div class="bfoot">“Verified / run” is the primary-source check with the issuing authority, separate from the document itself. Generated by Sentinel Compliance Command Center.</div></div>';
+    document.body.classList.add("printing");
+    window.print();
+    setTimeout(() => document.body.classList.remove("printing"), 400);
+  }
+
   // ---- Onboarding status board (per new-hire process checklist, saved to OneDrive) ----
   var ONBOARD_STEPS = [
     ["welcome", "Welcome letter sent"],
