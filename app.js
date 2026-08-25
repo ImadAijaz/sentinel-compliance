@@ -534,6 +534,16 @@
   function renderAlert() {
     const b = $("#alertBanner");
     if (!UNLOCKED.has(state.tab)) { b.innerHTML = ""; return; }   // hide until tab passcode entered
+    // If the server ignored the live roster cache, say so loudly. This used to be silent, so a
+    // board could be missing recently-added providers and still look completely normal.
+    const sup = window.SENTINEL_SEED && window.SENTINEL_SEED.deltaSuppressed;
+    if (sup) {
+      b.className = "alert-banner glass";
+      b.innerHTML = '<span class="pulse"></span><div class="ab-text"><b>Showing older roster data</b> — ' +
+        'the live roster cache was ignored because it did not look right (' + esc(sup.reason) + '). ' +
+        'Recently added providers may be missing. Click <b>Sync from Excel</b>, then <b>System check</b> if it persists.</div>';
+      return;
+    }
     const arr = DATA.filter(i => i.active !== false);
     const s = statsFor(arr);
     if (s.expired + s.critical === 0) { b.innerHTML = ""; return; }

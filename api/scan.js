@@ -66,8 +66,15 @@ function deriveEntity(folderRel) {
     // ("Rahman M Abdul" -> "abdul-m-rahman" instead of "abdul-rahman-m"), so documents and portal
     // links for every provider with a middle name or two-word surname pointed at a key that
     // matches no roster row. Move only the LAST token to the front, as the roster does.
-    const toks = entity.split(/\s+/).filter(Boolean);
-    const keyName = toks.length > 1 ? [toks[toks.length - 1]].concat(toks.slice(0, -1)).join(" ") : entity;
+    // The entityKey is "last-first[-middle]". A folder named "Last, First" already has the
+    // surname first, so it needs no reordering — only the "First Last" form does.
+    let keyName;
+    if (entity.indexOf(",") >= 0) {
+      keyName = entity.replace(/,/g, " ");
+    } else {
+      const toks = entity.split(/\s+/).filter(Boolean);
+      keyName = toks.length > 1 ? [toks[toks.length - 1]].concat(toks.slice(0, -1)).join(" ") : entity;
+    }
     return { scope: "provider", entity, entityKey: slug(keyName), phaseIdx: idx, sectionLabel: phase };
   }
   if (parts[0] === "State Readiness" && parts.length >= 3) {
@@ -247,9 +254,20 @@ module.exports = async (req, res) => {
           if (!name || /^[._]/.test(name) || /^zz\./i.test(name) || /^(test|temp|new folder|untitled)/i.test(name)) continue;
           try {
             const xl = require("../lib/excel");
-            const parts = name.split(/\s+/);
-            const last = parts[parts.length - 1] || name;
-            const first = parts.slice(0, -1).join(" ") || "";
+            // Folders are named either "First Last" or, following the roster's own convention,
+            // "Last, First". A comma is an explicit separator — splitting on whitespace instead
+            // produced last="Jose", first="Crespo," for a folder called "Crespo, Jose".
+            let last, first, parts;
+            if (name.indexOf(",") >= 0) {
+              const seg = name.split(",");
+              last = seg[0].trim();
+              first = seg.slice(1).join(",").trim();
+              parts = [last, first].filter(Boolean);     // comma form is unambiguous
+            } else {
+              parts = name.split(/\s+/);
+              last = parts[parts.length - 1] || name;
+              first = parts.slice(0, -1).join(" ") || "";
+            }
             if (v.deleted) {
               // Folder removed from SharePoint -> HARD delete the roster row(s) and log to
               // Recycle bin so the dashboard reflects it immediately (no "Inactive" middle step).

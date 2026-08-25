@@ -109,17 +109,31 @@ module.exports = async (req, res) => {
         })).filter(x => x.last);
       };
       const [actRows, inactRows] = await Promise.all([rowsOf(xl.SHEET_ACTIVE), rowsOf(xl.SHEET_INACTIVE)]);
-      const match = arr => arr.filter(x => (x.first + " " + x.last).toLowerCase().includes(q) || (x.last + " " + x.first).toLowerCase().includes(q) || x.last.toLowerCase().includes(q));
+      // Accept the way people actually type names: "Crespo, Jose", "Jose Crespo", or just
+      // "crespo". Punctuation and extra spaces are collapsed on both sides before comparing.
+      const norm = t => String(t || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const qn = norm(q);
+      const qTokens = qn.split(" ").filter(Boolean);
+      const match = arr => arr.filter(x => {
+        const a = norm(x.first + " " + x.last), b = norm(x.last + " " + x.first);
+        if (a.includes(qn) || b.includes(qn)) return true;
+        // Every typed word appears somewhere in the name, in any order.
+        return qTokens.length > 0 && qTokens.every(t => a.includes(t));
+      });
       const inActive = match(actRows), inInactive = match(inactRows);
 
       const baked = (data.items || []).filter(i => i.scope === "provider");
-      const bakedHit = [...new Set(baked.filter(i => String(i.entity || "").toLowerCase().includes(q) || String(i.entityKey || "").includes(q.replace(/[^a-z0-9]+/g, "-"))).map(i => i.entityKey))];
+      const nameHit = t => { const a = norm(t); return a.includes(qn) || (qTokens.length > 0 && qTokens.every(w => a.includes(w))); };
+      const bakedHit = [...new Set(baked.filter(i => nameHit(i.entity) || String(i.entityKey || "").includes(qTokens.join("-"))).map(i => i.entityKey))];
 
       let delta = null; try { delta = await G.readJsonAt(token, G.drivePath("_Sentinel/roster_delta.json")); } catch (e) {}
-      const dNew = ((delta && delta.newProviders) || []).filter(p => ((p.first || "") + " " + (p.last || "")).toLowerCase().includes(q) || String(p.last || "").toLowerCase().includes(q));
+      const dNew = ((delta && delta.newProviders) || []).filter(p => {
+        const a = norm((p.first || "") + " " + (p.last || ""));
+        return a.includes(qn) || (qTokens.length > 0 && qTokens.every(t => a.includes(t)));
+      });
       const { applyRosterDelta } = require("../lib/delta");
       const merged = await applyRosterDelta(baked);
-      const visible = [...new Set(merged.filter(i => i.scope === "provider" && String(i.entity || "").toLowerCase().includes(q)).map(i => i.entityKey + (i.active === false ? " (inactive)" : "")))];
+      const visible = [...new Set(merged.filter(i => i.scope === "provider" && nameHit(i.entity)).map(i => i.entityKey + (i.active === false ? " (inactive)" : "")))];
 
       // Plain-English verdict.
       let verdict;
@@ -661,15 +675,19 @@ module.exports = async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const tabs = (s.tabs && s.tabs.length) ? s.tabs : ["provider", "facility", "other"];
   let items = (data.items || []).filter(i => tabs.includes(i.scope));
+  let deltaSuppressed = null;
   // Merge the live roster delta — surfaces Excel-roster changes without a code redeploy.
   // Placeholders carry a SharePoint folderLink so the QR/upload flow works immediately.
   if (tabs.includes("provider")) {
     const { applyRosterDelta } = require("../lib/delta");
     items = await applyRosterDelta(items);
+    // Carry the "we ignored the live roster cache" warning through to the client, so a stale
+    // board announces itself instead of quietly looking normal.
+    deltaSuppressed = items.deltaSuppressed || null;
   }
   const keys = new Set(items.map(i => i.entityKey));
   const entityFiles = {};
   for (const k in (data.entityFiles || {})) if (keys.has(k)) entityFiles[k] = data.entityFiles[k];
   const contacts = tabs.includes("facility") ? (data.contacts || []) : [];
-  res.status(200).json(Object.assign({}, data, { items, entityFiles, contacts, allowedTabs: tabs }));
+  res.status(200).json(Object.assign({}, data, { items, entityFiles, contacts, allowedTabs: tabs, deltaSuppressed }));
 };
