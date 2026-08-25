@@ -116,7 +116,16 @@ module.exports = async (req, res) => {
       if (!cands.length) { res.status(200).json({ ok: false, message: "No PDF documents on file to read." }); return; }
 
       const token = await G.accessToken();
-      const pdf = require("pdf-parse");
+      // Require the inner module, NOT the package entry point. pdf-parse's index.js runs a debug
+      // block when `module.parent` is falsy, which reads a test PDF relative to the working
+      // directory — in a bundled serverless function that throws at require time and takes the
+      // whole endpoint down. lib/pdf-parse.js is the actual parser with no such side effect.
+      // Loaded lazily and guarded: if the PDF library is unavailable in the deployed bundle this
+      // one feature must degrade with a clear message, never break /api/data (which serves the
+      // whole dashboard).
+      let pdf;
+      try { pdf = require("pdf-parse/lib/pdf-parse.js"); }
+      catch (le) { res.status(200).json({ ok: false, message: "The PDF reader is not available in this deployment, so documents can't be read here." }); return; }
       const found = { emails: [], phones: [], degree: "", from: [], scanned: [] };
       for (const it of cands) {
         try {
