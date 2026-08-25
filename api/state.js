@@ -24,7 +24,7 @@ module.exports = async (req, res) => {
       // so a single empty POST silently erased the lot. Require a plausibly-shaped object, and
       // refuse a write that would drop the existing audit trail on the floor.
       if (!body || typeof body !== "object" || Array.isArray(body)) { res.status(400).json({ error: "expected a state object" }); return; }
-      const KNOWN = ["edits", "added", "deleted", "logs", "watch", "audit", "leads", "tasks", "snapshots", "verified"];
+      const KNOWN = ["edits", "added", "deleted", "logs", "watch", "audit", "leads", "tasks", "snapshots", "verified", "profiles"];
       if (!KNOWN.some(k => k in body)) { res.status(400).json({ error: "state object has none of the expected keys" }); return; }
       const prev = (await readJsonAt(token, PATH)) || {};
       const prevAudit = Array.isArray(prev.audit) ? prev.audit.length : 0;

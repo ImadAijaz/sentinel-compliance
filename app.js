@@ -61,7 +61,7 @@
     return null;
   }
   let DATA = [];                   // merged item list
-  let OVERLAY = loadJSON(OVERLAY_KEY, { edits: {}, added: [], deleted: [], logs: {}, watch: [], audit: [], leads: {}, tasks: {}, snapshots: {}, verified: {} });
+  let OVERLAY = loadJSON(OVERLAY_KEY, { edits: {}, added: [], deleted: [], logs: {}, watch: [], audit: [], leads: {}, tasks: {}, snapshots: {}, verified: {}, profiles: {} });
   ["watch", "audit"].forEach(k => { if (!OVERLAY[k]) OVERLAY[k] = []; });
   ["leads", "tasks", "snapshots", "logs", "edits", "verified"].forEach(k => { if (!OVERLAY[k]) OVERLAY[k] = {}; });
   let PREFS = loadJSON(PREF_KEY, { theme: "light" });
@@ -326,7 +326,7 @@
     if (CLOUD) {
       // Saved edits/notes/verify marks live in OneDrive now (no Supabase). Best-effort, background.
       fetch("/api/state").then(r => r.ok ? r.json() : null).then(d => {
-        if (d && Object.keys(d).length) { OVERLAY = Object.assign({ edits: {}, added: [], deleted: [], logs: {}, watch: [], audit: [], leads: {}, tasks: {}, snapshots: {}, verified: {} }, d); if (!OVERLAY.verified) OVERLAY.verified = {}; buildData(); render(); }
+        if (d && Object.keys(d).length) { OVERLAY = Object.assign({ edits: {}, added: [], deleted: [], logs: {}, watch: [], audit: [], leads: {}, tasks: {}, snapshots: {}, verified: {}, profiles: {} }, d); if (!OVERLAY.verified) OVERLAY.verified = {}; buildData(); render(); }
       }).catch(() => {});
       pullCloudUploads(render);
     } else if (location.protocol.indexOf("http") === 0) {
@@ -1071,7 +1071,30 @@
       '.pq-dec{border:2px solid var(--accent,#0f766e);border-radius:10px;padding:12px 14px;margin-top:10px;background:var(--surface-solid,#fff)}' +
       '.pq-note{border:1px solid var(--hair,#e2e8f0);border-radius:8px;min-height:52px;padding:8px 10px;font-size:12px;' +
       'color:var(--ink-2,#64748b);background:var(--surface-solid,#fff);white-space:pre-wrap}' +
-      '.pq-wrap{overflow-x:auto}';
+      '.pq-wrap{overflow-x:auto}' +
+      // Give the form a much wider, taller window and lay the lower half out in two columns, so
+      // the whole thing fits on screen instead of being a long scroll.
+      '#modalInner.pq-wide{width:min(1460px,100%)}' +
+      '#modalInner.pq-wide .modal-body{max-height:88vh;padding:16px 18px}' +
+      '#modalInner.pq-wide .modal-head{padding:12px 18px}' +
+      '.pq-2col{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:20px;align-items:start}' +
+      '@media(max-width:1180px){.pq-2col{grid-template-columns:1fr}}' +
+      '.pq-h:first-child{margin-top:0}' +
+      '.pq-2col>div>.pq-h:first-child{margin-top:0}' +
+      // Editable fields — same look as the read-only ones so the form still reads as a form.
+      '.pq-f input,.pq-f textarea{width:100%;border:0;padding:0;margin-top:2px;font:inherit;font-size:13px;' +
+      'font-weight:650;color:var(--ink,#0f172a);background:transparent;outline:none;box-sizing:border-box}' +
+      '.pq-f textarea{font-weight:500;font-size:12.5px;resize:vertical;min-height:74px;line-height:1.6}' +
+      '.pq-f input::placeholder,.pq-f textarea::placeholder{color:var(--ink-3,#94a3b8);font-weight:600;font-style:italic}' +
+      '.pq-f.edit{border-color:var(--accent,#0f766e)}' +
+      '.pq-f.edit:focus-within{box-shadow:0 0 0 3px rgba(15,118,110,.13)}' +
+      '.pq-save{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}' +
+      // Candidate chips from the document reader — one click to accept a value.
+      '.pq-cand{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}' +
+      '.pq-chip{border:1px solid var(--hair,#e2e8f0);background:var(--surface-solid,#fff);border-radius:999px;' +
+      'padding:4px 11px;font-size:11.5px;font-weight:700;cursor:pointer;color:var(--ink,#0f172a)}' +
+      '.pq-chip:hover{border-color:var(--accent,#0f766e);color:var(--accent,#0f766e)}' +
+      '.pq-chip.src{cursor:default;font-weight:600;color:var(--ink-3,#94a3b8);border-style:dashed}';
     document.head.appendChild(s);
   }
 
@@ -1079,6 +1102,7 @@
   function pqProfile(entityKey) {
     const { mine, by } = pqIndex(entityKey);
     const name = (mine[0] && mine[0].entity) || entityKey;
+    const saved = (OVERLAY.profiles && OVERLAY.profiles[entityKey]) || {};
     const findDoc = re => mine.find(i => i.isFile && (re.test(i.category || "") || re.test(pfFileName(i)))) || null;
 
     // Board certification: the roster's Board Certified column lands in authority/number.
@@ -1158,10 +1182,19 @@
 
     return {
       entityKey, name, mine, by, screen, certs, boards, other, boardVerified, bcode, lapsed, specialty,
-      email: (mine.find(i => i.email) || {}).email || "",
+      // Anything a human has typed and saved on this form wins over what the roster holds — they
+      // have looked at the documents, we have only parsed a spreadsheet. Saved values live in the
+      // shared overlay (OVERLAY.profiles), so they persist and every user sees the same thing.
+      saved: saved,
+      email: saved.email || (mine.find(i => i.email) || {}).email || "",
       // Degree/title comes from the COI Roster sheet's Title column (the Credentials sheet has
       // no such field). Phone is in no sheet at all — it can only come from the documents.
-      degree: (mine.find(i => i.providerTitle) || {}).providerTitle || "",
+      degree: saved.degree || (mine.find(i => i.providerTitle) || {}).providerTitle || "",
+      phone: saved.phone || "",
+      employer: saved.employer || "",
+      reviewer: saved.reviewer || "",
+      reviewDate: saved.reviewDate || "",
+      notes: saved.notes || "",
       headshot: findDoc(/photo|headshot|badge/i),
       summary: { allScreenOk, boardVerified, certsCurrent },
       decision,
@@ -1172,40 +1205,43 @@
     pqStyles();
     const p = pqProfile(entityKey);
     const fld = (k, v, na) => '<div class="pq-f"><div class="k">' + esc(k) + '</div><div class="v' + (na ? " na" : "") + '">' + esc(v) + '</div></div>';
+    // An editable field. Saved to the shared overlay, so it persists and everyone sees it.
+    const inp = (k, id, v, ph, type) => '<div class="pq-f edit"><div class="k">' + esc(k) + '</div>' +
+      '<input id="' + id + '" type="' + (type || "text") + '" value="' + esc(v || "") + '" placeholder="' + esc(ph || "") + '"></div>';
     const NT = "not tracked";
 
     let h = '<div class="pq">';
     h += '<div class="pq-band"><div class="t1">WCGTX</div><div class="t2">PHYSICIAN PROFILE</div>' +
       '<div class="t3">HR + CREDENTIALING &nbsp;·&nbsp; INTERNAL REVIEW</div></div>' +
-      '<div class="pq-sub">Texas physician staffing &nbsp;|&nbsp; Preliminary screening before full credentialing</div>';
+      '<div class="pq-sub">Texas physician staffing &nbsp;|&nbsp; Physician credentialing record</div>';
 
-    // Identity block
+    // ---- Identity ----------------------------------------------------------------------------
     h += '<div class="pq-id"><div class="pq-photo"><div>PROFESSIONAL<br>HEADSHOT</div>' +
       (p.headshot ? '<div style="color:var(--st-good,#047857)">☑ ON FILE</div>' : '<div>[ NOT ON FILE ]</div>') + '</div>' +
       '<div style="display:grid;gap:9px">' +
       fld("Physician name", p.name) +
       fld("Primary specialty", p.specialty || NT, !p.specialty) +
       fld("State", "TEXAS") +
-      fld("Email", p.email || NT, !p.email) +
+      inp("Email", "pqEmail", p.email, "none on file") +
       '</div><div style="display:grid;gap:9px">' +
-      fld("Credentials / degree", p.degree || NT, !p.degree) +
+      inp("Credentials / degree", "pqDegree", p.degree, "e.g. MD") +
       fld("Profile ID", p.entityKey) +
-      '<div class="pq-f" id="pqPhoneCell"><div class="k">Phone</div><div class="v na">' + NT + '</div></div>' +
-      fld("Current employer / group", NT, true) +
+      inp("Phone", "pqPhone", p.phone, "none on file", "tel") +
+      inp("Current employer / group", "pqEmployer", p.employer, "not recorded") +
       '</div></div>' +
-      // Phone is in no sheet, and only about half the providers have an email on the COI sheet.
-      // Offer to read the provider's own PDFs for the rest — on demand, not automatically.
       '<div style="margin-top:9px"><button class="icon-btn" id="pqReadDocs" style="padding:5px 10px">🔍 Read phone / email from their documents</button>' +
-      '<span id="pqReadMsg" class="pf-sub pf-dim" style="margin-left:9px"></span></div>';
+      '<span id="pqReadMsg" class="pf-sub pf-dim" style="margin-left:9px"></span></div>' +
+      '<div id="pqCands"></div>';
 
-    // Board certification
+    // ---- Two columns: screening on the left, everything else on the right ---------------------
+    h += '<div class="pq-2col"><div>';
+
     h += '<div class="pq-h">Required board certification — at least one must be verified</div>' +
       '<div class="pq-row">' + p.boards.map(b => pqBox(b.on, b.label)).join("") +
       pqBox(!!p.other, "OTHER: " + (p.other || "__________")) + '</div>' +
       (p.lapsed ? '<div class="pq-sub" style="margin:8px 0 0;color:var(--st-expired,#b91c1c)">Roster records this board certification as <b>' + esc(p.bcode) + '</b> — treated as not verified.</div>'
         : (!p.boardVerified ? '<div class="pq-sub" style="margin:8px 0 0;color:var(--st-expired,#b91c1c)">No board certification recorded on the roster' + (p.bcode ? ' (column reads "' + esc(p.bcode) + '")' : '') + '.</div>' : ''));
 
-    // Screening table
     h += '<div class="pq-h">Primary-source and background screening</div><div class="pq-wrap">' +
       '<table class="pq-t"><thead><tr><th>Check</th><th>Verification source</th><th>Status</th><th>Detail</th></tr></thead><tbody>';
     p.screen.forEach(r => {
@@ -1218,13 +1254,13 @@
     });
     h += '</tbody></table></div>';
 
-    // Life-support certifications
+    h += '</div><div>';   // ---- right column ----
+
     h += '<div class="pq-h">Life-support &amp; trauma certifications</div><div class="pq-row">' +
       p.certs.map(c => '<span class="pq-box' + (c.current ? " on" : "") + '">' + (c.current ? "☑" : "☐") + " " + esc(c.label) +
         ' &nbsp;' + (c.current ? "CURRENT" : (c.it ? "EXPIRED" : "MISSING")) + ' &nbsp;<span style="font-weight:600;opacity:.75">Exp: ' + esc(c.exp) + '</span></span>').join("") +
       '</div>';
 
-    // Summary + decision
     const dOk = p.decision === "GREEN - ADVANCE", dBad = p.decision === "DOES NOT MEET CRITERIA";
     h += '<div class="pq-h">Credentialing summary &amp; review decision</div>' +
       '<div style="display:grid;gap:7px">' +
@@ -1237,36 +1273,85 @@
       pqBox(dOk, "GREEN - ADVANCE") + pqBox(!dOk && !dBad, "HOLD / FOLLOW-UP") + pqBox(dBad, "DOES NOT MEET CRITERIA") +
       '</div><div class="pq-sub" style="margin:9px 0 0">Suggested from the tracked roster data only. A reviewer confirms and signs off below — this is not an automatic determination.</div></div>';
 
-    // Reviewer + notes (left blank for the human, as on the form)
     h += '<div class="pq-h">Reviewer</div><div class="pq-cols2">' +
-      fld("Reviewer name / title", "—", true) + fld("Review date", "—", true) + '</div>' +
-      '<div class="pq-h">Notes / outstanding items</div><div class="pq-note">' +
-      esc(pqOutstanding(p).join("\n") || "—") + '</div></div>';
+      inp("Reviewer name / title", "pqReviewer", p.reviewer, "who reviewed this") +
+      inp("Review date", "pqReviewDate", p.reviewDate, "", "date") + '</div>' +
+      '<div class="pq-h">Notes / outstanding items</div>' +
+      '<div class="pq-f edit"><textarea id="pqNotes" placeholder="Anything outstanding…">' +
+      esc(p.notes || pqOutstanding(p).join("\n")) + '</textarea></div>' +
+      '<div class="pq-save"><button class="btn-primary" id="pqSave" style="min-width:150px">Save changes</button>' +
+      '<button class="icon-btn" id="pqRefill" title="Replace the notes with the current outstanding items">↻ Refill from data</button>' +
+      '<span id="pqSaveMsg" class="pf-sub pf-dim"></span></div>';
+
+    h += '</div></div></div>';   // right column, 2col, .pq
 
     const head = '<button class="icon-btn" id="pfPrint" style="padding:5px 10px">\u{1F5A8} Print</button>';
     openModal("Physician Profile — " + esc(name), h, head);
+    // Wider window + taller body for this form specifically (closeModal resets the class).
+    const inner = $("#modalInner"); if (inner) inner.className = "modal pq-wide";
+
     const pb = $("#pfPrint"); if (pb) pb.onclick = () => printProfile(entityKey, name);
+
+    // ---- save ---------------------------------------------------------------------------------
+    const val = id => { const e = $("#" + id); return e ? e.value.trim() : ""; };
+    const saveNow = (quiet) => {
+      OVERLAY.profiles = OVERLAY.profiles || {};
+      const rec = {
+        email: val("pqEmail"), degree: val("pqDegree"), phone: val("pqPhone"),
+        employer: val("pqEmployer"), reviewer: val("pqReviewer"),
+        reviewDate: val("pqReviewDate"), notes: $("#pqNotes") ? $("#pqNotes").value : "",
+        updatedAt: new Date().toISOString(),
+        updatedBy: (window.SENTINEL_AUTH && window.SENTINEL_AUTH.email) || (CURRENT_USER && CURRENT_USER.label) || "",
+      };
+      // Drop the record entirely when every field is blank, so an untouched profile leaves nothing.
+      const any = ["email", "degree", "phone", "employer", "reviewer", "reviewDate", "notes"].some(k => rec[k]);
+      if (any) OVERLAY.profiles[entityKey] = rec; else delete OVERLAY.profiles[entityKey];
+      saveOverlay();
+      const m = $("#pqSaveMsg");
+      if (m && !quiet) { m.textContent = "Saved " + new Date().toLocaleTimeString(); setTimeout(() => { if (m) m.textContent = ""; }, 4000); }
+    };
+    const sv = $("#pqSave"); if (sv) sv.onclick = () => { saveNow(); toast("✓ Profile saved for " + name + "."); };
+    const rf = $("#pqRefill");
+    if (rf) rf.onclick = () => { const t = $("#pqNotes"); if (t) { t.value = pqOutstanding(p).join("\n"); toast("Notes refilled from the current data."); } };
+
+    // ---- read contact details out of the documents --------------------------------------------
     const rd = $("#pqReadDocs");
     if (rd) rd.onclick = () => {
-      const msg = $("#pqReadMsg");
-      rd.disabled = true; msg.textContent = "Reading their PDFs…";
+      const msg = $("#pqReadMsg"), cands = $("#pqCands");
+      rd.disabled = true; msg.textContent = "Reading their PDFs…"; cands.innerHTML = "";
       fetch("/api/data?contact=" + encodeURIComponent(entityKey), { method: "POST" })
         .then(r => r.json()).then(d => {
           rd.disabled = false;
           if (d.error) { msg.textContent = d.error; return; }
-          const cell = $("#pqPhoneCell");
-          if (d.phones && d.phones.length && cell) {
-            cell.innerHTML = '<div class="k">Phone</div><div class="v">' + esc(d.phones[0]) + '</div>' +
-              (d.phones.length > 1 ? '<div class="pf-sub pf-dim">also found: ' + esc(d.phones.slice(1).join(", ")) + '</div>' : "") +
-              '<div class="pf-sub pf-dim">from ' + esc((d.readFrom || []).join(", ")) + '</div>';
+          const phones = d.phones || [], emails = d.emails || [];
+          // Fill the blanks automatically, but never overwrite something already there.
+          const setIfEmpty = (id, v) => { const e = $("#" + id); if (e && !e.value.trim() && v) { e.value = v; return true; } return false; };
+          setIfEmpty("pqPhone", phones[0]);
+          setIfEmpty("pqEmail", emails[0]);
+          setIfEmpty("pqDegree", d.degree);
+          if (!phones.length && !emails.length && !d.degree) {
+            msg.textContent = d.note || "Nothing found.";
+            if ((d.unreadable || []).length) cands.innerHTML = '<div class="pf-sub pf-dim" style="margin-top:7px">Could not read (likely scans): ' + esc(d.unreadable.join(", ")) + '</div>';
+            return;
           }
-          const bits = [];
-          if (d.phones && d.phones.length) bits.push(d.phones.length + " phone number" + (d.phones.length > 1 ? "s" : ""));
-          if (d.emails && d.emails.length) bits.push(d.emails.length + " email" + (d.emails.length > 1 ? "s" : "") + " (" + esc(d.emails[0]) + ")");
-          if (d.degree) bits.push("degree " + esc(d.degree));
-          msg.innerHTML = bits.length
-            ? esc("Found " + bits.join(", ") + ". ") + '<span style="color:var(--st-due,#854d0e)">Check before relying on it — a CV can list a reference’s number too.</span>'
-            : esc(d.note || "Nothing found.") + ((d.unreadable || []).length ? esc(" Unreadable (likely scans): " + d.unreadable.join(", ")) : "");
+          msg.innerHTML = '<span style="color:var(--st-due,#854d0e)">Check these before relying on them — a CV can list a reference’s number too.</span>';
+          // Every candidate as a chip: one click puts it in the field. Far clearer than a
+          // run-on "also found:" sentence.
+          const group = (label, items, target) => items.length
+            ? '<div style="margin-top:9px"><div class="k" style="font-size:9.5px;font-weight:800;letter-spacing:.08em;' +
+              'text-transform:uppercase;color:var(--ink-3,#94a3b8)">' + esc(label) + ' — click to use</div>' +
+              '<div class="pq-cand">' + items.map(v => '<button class="pq-chip" data-t="' + target + '" data-v="' + esc(v) + '">' + esc(v) + '</button>').join("") + '</div></div>'
+            : "";
+          cands.innerHTML =
+            group("Phone numbers found", phones, "pqPhone") +
+            group("Email addresses found", emails, "pqEmail") +
+            (d.degree ? group("Degree", [d.degree], "pqDegree") : "") +
+            ((d.readFrom || []).length ? '<div class="pq-cand" style="margin-top:8px">' +
+              d.readFrom.map(f => '<span class="pq-chip src">from ' + esc(f) + '</span>').join("") + '</div>' : "") +
+            ((d.unreadable || []).length ? '<div class="pf-sub pf-dim" style="margin-top:6px">Could not read (likely scans): ' + esc(d.unreadable.join(", ")) + '</div>' : "");
+          cands.querySelectorAll(".pq-chip[data-v]").forEach(b => {
+            b.onclick = () => { const t = $("#" + b.dataset.t); if (t) { t.value = b.dataset.v; t.focus(); } };
+          });
         })
         .catch(e => { rd.disabled = false; msg.textContent = String(e.message || e); });
     };
@@ -1298,8 +1383,8 @@
       '<tr><td><b>Physician name</b></td><td>' + esc(p.name) + '</td><td><b>Profile ID</b></td><td>' + esc(p.entityKey) + '</td></tr>' +
       '<tr><td><b>Primary specialty</b></td><td>' + esc(p.specialty || "not tracked") + '</td><td><b>State</b></td><td>TEXAS</td></tr>' +
       '<tr><td><b>Email</b></td><td>' + esc(p.email || "not tracked") + '</td><td><b>Headshot</b></td><td>' + (p.headshot ? "On file" : "Not on file") + '</td></tr>' +
-      '<tr><td><b>Credentials / degree</b></td><td>' + esc(p.degree || "not tracked") + '</td><td><b>Phone</b></td><td>not in the roster</td></tr>' +
-      '<tr><td><b>Current employer / group</b></td><td colspan="3">not tracked</td></tr>' +
+      '<tr><td><b>Credentials / degree</b></td><td>' + esc(p.degree || "not tracked") + '</td><td><b>Phone</b></td><td>' + esc(p.phone || "not recorded") + '</td></tr>' +
+      '<tr><td><b>Current employer / group</b></td><td colspan="3">' + esc(p.employer || "not recorded") + '</td></tr>' +
       '</tbody></table>' +
       '<h2 style="font-size:12pt;margin:14px 0 6px">Required board certification</h2>' +
       '<div>' + p.boards.map(b => box(b.on, b.label)).join(" &nbsp; ") + " &nbsp; " + box(!!p.other, "OTHER: " + (p.other || "__________")) + '</div>' +
@@ -1317,9 +1402,10 @@
       box(p.decision === "DOES NOT MEET CRITERIA", "DOES NOT MEET CRITERIA") +
       '<div style="font-size:9pt;margin-top:4px">Suggested from tracked roster data only; the reviewer below confirms.</div></div>' +
       '<h2 style="font-size:12pt;margin:14px 0 6px">Notes / outstanding items</h2>' +
-      '<div style="white-space:pre-wrap;font-size:10pt">' + esc(pqOutstanding(p).join("\n") || "—") + '</div>' +
-      '<table class="btable" style="margin-top:14px"><tbody><tr><td><b>Reviewer name / title</b></td><td>__________________________</td>' +
-      '<td><b>Review date</b></td><td>______________</td></tr></tbody></table>' +
+      // Print whatever the reviewer actually typed; fall back to the auto-generated list.
+      '<div style="white-space:pre-wrap;font-size:10pt">' + esc(p.notes || pqOutstanding(p).join("\n") || "—") + '</div>' +
+      '<table class="btable" style="margin-top:14px"><tbody><tr><td><b>Reviewer name / title</b></td><td>' + esc(p.reviewer || "__________________________") + '</td>' +
+      '<td><b>Review date</b></td><td>' + esc(p.reviewDate ? fmtD(p.reviewDate) : "______________") + '</td></tr></tbody></table>' +
       '<div class="bfoot">Generated by Sentinel Compliance Command Center from the WCGTX master roster.</div></div>';
     document.body.classList.add("printing");
     window.print();
@@ -1516,6 +1602,12 @@
       '<button class="btn-primary" id="stDiag" style="flex:1;min-width:130px">Check only</button>' +
       '<button class="btn-primary" id="stFull" style="flex:1;min-width:130px;background:#b45309">Full test</button>' +
       '</div>' +
+      // Recovery for "I created a folder / added documents and the app never noticed".
+      '<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--hair,#e2e8f0)">' +
+      '<div style="font-weight:700;font-size:13px;margin-bottom:6px">Rescan the documents folder</div>' +
+      '<div class="item-sub" style="margin-bottom:8px">Walks the whole Sentinel documents tree again from the start. Use this if you added a provider folder or documents in OneDrive and the app did not pick them up. Safe to run any time — it only reads.</div>' +
+      '<button class="btn-primary" id="stRescan" style="min-width:150px">Rescan everything</button>' +
+      '<span id="stRescanMsg" class="pf-sub pf-dim" style="margin-left:9px"></span></div>' +
       // Trace one name through Excel -> baked data -> cache -> dashboard, so "I can't see Dr X"
       // gets a specific answer instead of guesswork.
       '<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--hair,#e2e8f0)">' +
@@ -1574,6 +1666,32 @@
           '<div class="pf-sub pf-dim">Workbook totals: ' + ((d.counts && d.counts.liveActive) || 0) + ' active, ' + ((d.counts && d.counts.liveInactive) || 0) + ' inactive · cache built ' + esc((d.inCachedDelta && d.inCachedDelta.deltaGeneratedAt) || "never") + '</div>' +
           '</div>';
       }).catch(e => { out.innerHTML = '<div style="color:#b91c1c;font-size:13px">Lookup failed: ' + esc(String(e.message || e)) + '</div>'; });
+    };
+    // Full re-crawl. The scan is incremental, so it can only ever report a few pages per call —
+    // keep calling until it says there is nothing left, rather than making the user click twice.
+    const rescanBtn = body.querySelector("#stRescan");
+    if (rescanBtn) rescanBtn.onclick = () => {
+      const m = body.querySelector("#stRescanMsg");
+      rescanBtn.disabled = true;
+      let round = 0, totalNew = 0, totalSupp = 0;
+      const step = (first) => {
+        round++;
+        m.textContent = "Scanning… pass " + round;
+        fetch("/api/scan" + (first ? "?rescan=1" : "")).then(r => r.json()).then(d => {
+          if (d && d.ok === false) { m.textContent = d.message || "Scan failed."; rescanBtn.disabled = false; return; }
+          totalNew += (d && d.changed) || 0;
+          totalSupp += (d && d.suppChanged) || 0;
+          // Bounded so a very large drive can't spin forever in one sitting.
+          if (d && d.moreToScan && round < 25) { step(false); return; }
+          rescanBtn.disabled = false;
+          m.textContent = "Done after " + round + " pass" + (round === 1 ? "" : "es") + " — " +
+            totalNew + " document(s) matched, " + totalSupp + " new file record(s)" +
+            (d && d.resynced ? " (the scan cursor had expired and was reset)" : "") +
+            (d && d.error ? " — " + d.error : "") + ". Now click “Sync from Excel”.";
+          if (totalNew || totalSupp) toast("✓ Rescan found " + (totalNew + totalSupp) + " item(s). Click 'Sync from Excel' next.");
+        }).catch(e => { rescanBtn.disabled = false; m.textContent = String(e.message || e); });
+      };
+      step(true);
     };
     body.querySelector("#stWhoGo").onclick = lookup;
     body.querySelector("#stWho").onkeydown = (e) => { if (e.key === "Enter") lookup(); };
@@ -2607,7 +2725,7 @@
   function backup() { download("sentinel-backup-" + new Date().toISOString().slice(0, 10) + ".json", JSON.stringify(OVERLAY, null, 2), "application/json"); toast("Backup downloaded."); }
   function restore() {
     const inp = el("input"); inp.type = "file"; inp.accept = "application/json,.json";
-    inp.onchange = () => { const f = inp.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { try { const o = JSON.parse(rd.result); OVERLAY = Object.assign({ edits: {}, added: [], deleted: [], logs: {}, watch: [], audit: [], leads: {}, tasks: {}, snapshots: {} }, o); saveOverlay(); buildData(); render(); toast("Backup restored."); } catch (e) { toast("Invalid backup file."); } }; rd.readAsText(f); };
+    inp.onchange = () => { const f = inp.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { try { const o = JSON.parse(rd.result); OVERLAY = Object.assign({ edits: {}, added: [], deleted: [], logs: {}, watch: [], audit: [], leads: {}, tasks: {}, snapshots: {}, verified: {}, profiles: {} }, o); saveOverlay(); buildData(); render(); toast("Backup restored."); } catch (e) { toast("Invalid backup file."); } }; rd.readAsText(f); };
     inp.click();
   }
 

@@ -220,22 +220,46 @@ module.exports = async (req, res) => {
     await indexAsync();
     const token = await accessToken();
     const state = (await readJsonAt(token, STATE)) || {};
-    if (!state.deltaLink || state.driveTag !== "docs-v1") {
-      const r = await fetch(docsRoot() + "/root/delta?token=latest", { headers: { Authorization: "Bearer " + token } });
-      const j = await r.json();
-      await writeJsonAt(token, STATE, { deltaLink: j["@odata.deltaLink"], driveTag: "docs-v1" });
-      res.status(200).json({ ok: true, initialized: true, detected: 0 });
+    // ?rescan=1 forces a FULL re-crawl of the document tree from the beginning, instead of only
+    // watching for changes from now on. This is the recovery path when folders that already exist
+    // were never picked up — the normal first-run below starts at "latest", which by design skips
+    // everything that was already there.
+    const forceRescan = new URL(req.url, "http://localhost").searchParams.get("rescan") === "1";
+    if (forceRescan) {
+      await writeJsonAt(token, STATE, { deltaLink: docsRoot() + "/root/delta", driveTag: "docs-v1", fullRescanStartedAt: new Date().toISOString() });
+    } else if (!state.deltaLink || state.driveTag !== "docs-v1") {
+      // First ever run: start from a full crawl too, NOT token=latest. Starting at "latest" meant
+      // every folder and file already on the drive was invisible to the app until it was touched
+      // again — which is exactly how an existing provider folder goes unnoticed.
+      await writeJsonAt(token, STATE, { deltaLink: docsRoot() + "/root/delta", driveTag: "docs-v1", fullRescanStartedAt: new Date().toISOString() });
+      res.status(200).json({ ok: true, initialized: true, fullCrawl: true, detected: 0, message: "Started a full scan of the documents folder — run this again (or just reload) to work through it." });
       return;
     }
     const detected = (await readJsonAt(token, DETECTED)) || {};
     const supplemental = (await readJsonAt(token, SUPP)) || {};   // url -> full record
-    let next = state.deltaLink, deltaLink = null, changed = 0, suppChanged = 0, pages = 0;
+    let next = forceRescan ? (docsRoot() + "/root/delta") : state.deltaLink;
+    let deltaLink = null, changed = 0, suppChanged = 0, pages = 0, resynced = false, fetchError = null;
     const folderErrors = [];   // surface folder-watch failures (e.g. trash write) instead of swallowing
     const dateUpdates = [];     // {entityKey,category,date} to auto-fill into the Credentials sheet (empty cells only)
     const start = Date.now();
     while (next && pages < 8 && Date.now() - start < 4000) {   // keep delta short, leave time for one OCR
       const r = await fetch(next, { headers: { Authorization: "Bearer " + token } });
-      if (!r.ok) break;
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        // A delta token eventually expires; Graph answers 410 Gone / resyncRequired. The old code
+        // just broke out of the loop and then wrote the SAME dead link back, so the scan was
+        // permanently and SILENTLY dead — no new folder or file was ever detected again, while
+        // still reporting ok:true. Recover by restarting the crawl from the beginning.
+        if (r.status === 410 || /resyncRequired|resync/i.test(body)) {
+          next = docsRoot() + "/root/delta";
+          resynced = true;
+          deltaLink = null;
+          pages++;
+          continue;
+        }
+        fetchError = "delta HTTP " + r.status + " " + body.slice(0, 140);
+        break;
+      }
       const j = await r.json();
       for (const v of (j.value || [])) {
         const folderRel = relFromParent((v.parentReference && v.parentReference.path) || "");
@@ -370,7 +394,11 @@ module.exports = async (req, res) => {
     // Save delta progress BEFORE the (slower) OCR step so nothing is lost on timeout.
     if (changed) await writeJsonAt(token, DETECTED, detected);
     if (suppChanged) await writeJsonAt(token, SUPP, supplemental);
-    await writeJsonAt(token, STATE, { deltaLink: deltaLink || next || state.deltaLink, driveTag: "docs-v1" });
+    // Never write back a link we know is dead. `deltaLink` is the fresh cursor from a completed
+    // page, `next` is the nextLink mid-crawl; only fall back to the previous cursor if we have
+    // neither AND the previous one didn't just fail.
+    const nextCursor = deltaLink || next || (fetchError ? (docsRoot() + "/root/delta") : state.deltaLink);
+    await writeJsonAt(token, STATE, { deltaLink: nextCursor, driveTag: "docs-v1" });
 
     // Background OCR: read the expiry for ONE not-yet-read document (keeps each run < 10s).
     let ocrChanged = false, ocred = null;
@@ -399,7 +427,12 @@ module.exports = async (req, res) => {
       catch (e) { excelFill = { error: String(e.message || e).slice(0, 160) }; }
     }
 
-    res.status(200).json({ ok: true, changed, suppChanged, items: Object.keys(detected).length, suppItems: Object.keys(supplemental).length, ocr: ocred, folderErrors, excelFill });
+    // Report the crawl state, so a stalled or recovering scan is visible instead of silent.
+    res.status(200).json({
+      ok: true, changed, suppChanged, items: Object.keys(detected).length,
+      suppItems: Object.keys(supplemental).length, ocr: ocred, folderErrors, excelFill,
+      pages, resynced, moreToScan: !!next && !deltaLink, error: fetchError || undefined,
+    });
   } catch (e) {
     res.status(200).json({ ok: false, message: String(e.message || e) });
   }
