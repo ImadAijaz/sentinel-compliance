@@ -1107,7 +1107,26 @@
 
     // Board certification: the roster's Board Certified column lands in authority/number.
     const bc = by["Board Certification"] || null;
-    const bcode = String((bc && (bc.authority || bc.number)) || "").trim();
+    let bcode = String((bc && (bc.authority || bc.number)) || "").trim();
+    // A provider added from the live roster gets placeholder items from a template, whose
+    // "authority" is the EXPECTED issuer ("Specialty Board", "AHA", "Carrier"…), not something
+    // observed about this person. Showing those as data produced nonsense like
+    // "OTHER: Specialty Board" and a specialty of "Board: Specialty Board".
+    // Verified against the roster: none of these ever appear as a real Board Certified value.
+    const TEMPLATE_AUTH = /^(specialty board|wcgtx|carrier|employee health|medical school|tmb ?\/ ?cme|texas dps|nppes|npdb|oig|aha|acs|dea|texas medical board)$/i;
+    if (TEMPLATE_AUTH.test(bcode)) bcode = "";
+    // Nothing usable on the roster? Read the board off the CERTIFICATE'S FILENAME. This needs no
+    // OCR — "ABEM Certificate_Crespo_J.pdf" names the board in plain text in the file name, which
+    // is exactly the case for a newly added provider whose roster cell is still empty.
+    const BOARD_ACRONYM = /\b(abem|abim|abfm|aobem|aobim|abps|abog|abpn|abucm|abs|abr|abo|aagp|abp)\b/i;
+    let bcodeFrom = bcode ? "roster" : "";
+    if (!bcode || /^(yes|no|\?|-+\s*::?|n\/?a)$/i.test(bcode)) {
+      const hit = mine.find(i => i.isFile && BOARD_ACRONYM.test(pfFileName(i) + " " + (i.category || "")));
+      if (hit) {
+        const m = (pfFileName(hit) + " " + (hit.category || "")).match(BOARD_ACRONYM);
+        if (m) { bcode = m[1].toUpperCase(); bcodeFrom = "document"; }
+      }
+    }
     const lapsed = /lapsed/i.test(bcode);
     const boards = PQ_BOARDS.map(([label, re]) => ({ label, on: !lapsed && re.test(bcode) }));
     const other = (!lapsed && bcode && !boards.some(b => b.on) && !/^(yes|no|\?|-+\s*::?|n\/?a)$/i.test(bcode)) ? bcode : "";
@@ -1183,7 +1202,7 @@
     else if (boardExplicitlyNone) decision = "DOES NOT MEET CRITERIA";
 
     return {
-      entityKey, name, mine, by, screen, certs, boards, other, boardVerified, bcode, lapsed, specialty,
+      entityKey, name, mine, by, screen, certs, boards, other, boardVerified, bcode, bcodeFrom, lapsed, specialty,
       // Anything a human has typed and saved on this form wins over what the roster holds — they
       // have looked at the documents, we have only parsed a spreadsheet. Saved values live in the
       // shared overlay (OVERLAY.profiles), so they persist and every user sees the same thing.
@@ -1243,7 +1262,13 @@
       '<div class="pq-row">' + p.boards.map(b => pqBox(b.on, b.label)).join("") +
       pqBox(!!p.other, "OTHER: " + (p.other || "__________")) + '</div>' +
       (p.lapsed ? '<div class="pq-sub" style="margin:8px 0 0;color:var(--st-expired,#b91c1c)">Roster records this board certification as <b>' + esc(p.bcode) + '</b> — treated as not verified.</div>'
-        : (!p.boardVerified ? '<div class="pq-sub" style="margin:8px 0 0;color:var(--st-expired,#b91c1c)">No board certification recorded on the roster' + (p.bcode ? ' (column reads "' + esc(p.bcode) + '")' : '') + '.</div>' : ''));
+        : (!p.boardVerified
+          ? '<div class="pq-sub" style="margin:8px 0 0;color:var(--st-expired,#b91c1c)">No board certification recorded on the roster' + (p.bcode ? ' (column reads "' + esc(p.bcode) + '")' : '') + '. Put the board code (ABEM / ABIM / ABFM…) in the roster’s Board Certified column, or set the specialty above.</div>'
+          // Be explicit when the board was read off a document rather than the roster, so nobody
+          // wonders where it came from — and so the roster still gets corrected properly.
+          : (p.bcodeFrom === "document"
+            ? '<div class="pq-sub" style="margin:8px 0 0">Board <b>' + esc(p.bcode) + '</b> read from the certificate on file, not from the roster — worth putting in the roster’s Board Certified column too.</div>'
+            : '')));
 
     h += '<div class="pq-h">Primary-source and background screening</div><div class="pq-wrap">' +
       '<table class="pq-t"><thead><tr><th>Check</th><th>Verification source</th><th>Status</th><th>Detail</th></tr></thead><tbody>';
