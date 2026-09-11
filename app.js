@@ -139,13 +139,27 @@
       const url = (typeof v === "string") ? v : v.url; if (!url) return;
       it.fileLink = url; it.isFile = true; it.uploaded = true;
       if (typeof v === "object" && v.name) it.uploadName = v.name;
+      if (typeof v === "object" && v.recordDate) {
+        it.recordDate = v.recordDate;
+        it.recurringFromDocument = !!v.recurring;
+        if (v.recurring) {
+          const effectiveDue = (v.date && (!it.expires || v.date > it.expires)) ? v.date : it.expires;
+          it.notes = "Latest evidence: " + v.recordDate +
+            (effectiveDue ? "; next due: " + effectiveDue : "; cadence not configured") +
+            (v.cadenceNote ? ". " + v.cadenceNote + "." : "");
+        }
+      }
       // A date parsed out of a FILENAME is a guess (a phone-scan name like "Scan_2026-01-05.pdf"
       // is the scan date, not the expiry), so flag it as unconfirmed rather than presenting it as
       // the real expiry. Never override a human's explicit edit.
       if (typeof v === "object" && v.date && !OVERLAY.edits[it.id]) {
-        it.expires = v.date; it.permanent = false; it.pending = false;
+        // Recurring evidence is forward-only: a late-arriving old inspection must not drag the
+        // current due date backwards.  Preserve the historical behavior for ordinary uploads.
+        if (!v.recurring || !it.expires || v.date > it.expires) it.expires = v.date;
+        it.permanent = false; it.pending = false;
         it.expiresAuto = true;
-        it.expiresFromFilename = true;
+        it.expiresFromFilename = !v.recurring;
+        it.recurringFromDocument = !!v.recurring;
       }
     });
   }
@@ -809,13 +823,12 @@
       head.innerHTML = (state.selectMode ? '<input type="checkbox" class="row-check grp-check" title="Select all items in this group">' : "") +
         '<div class="avatar" style="' + (isProvider ? "" : "background:linear-gradient(135deg,#6366f1,#4f46e5)") + '">' + (isProvider ? esc(initials) : '<svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">' + ICONS.building + '</svg>') + '</div>' +
         '<div><div class="g-name"><span style="opacity:.55">' + (gi + 1) + '.</span> ' + esc(name) + testTag + inactiveTag + rosterNote + '</div><div class="g-meta">' + items.length + ' tracked items · health ' + gs.score + '</div></div>' +
-        '<div class="mini-stats">' + miniRing(gs.score) + pills + (isProvider ? '<button class="icon-btn profile-btn" title="Full credentialing profile in one table" style="padding:5px 10px">👤 Profile</button><button class="icon-btn pemail-btn" title="Email this provider (to their email)" style="padding:5px 10px">✉ Email provider</button><button class="icon-btn portal-btn" title="Provider self-service portal (QR / link)" style="padding:5px 10px">🔗 Portal</button><button class="icon-btn binder-btn" title="Print survey-ready binder" style="padding:5px 10px">🗂 Binder</button>' : '<button class="icon-btn gemail-btn" title="Email me this group\'s report" style="padding:5px 10px">✉ Email</button>') + '<span class="worst-dot bg-' + worst + '"></span></div>' +
+        '<div class="mini-stats">' + miniRing(gs.score) + pills + (isProvider ? '<button class="icon-btn profile-btn" title="Full credentialing profile in one table" style="padding:5px 10px">👤 Profile</button><button class="icon-btn pemail-btn" title="Email this provider (to their email)" style="padding:5px 10px">✉ Email provider</button><button class="icon-btn binder-btn" title="Print survey-ready binder" style="padding:5px 10px">🗂 Binder</button>' : '<button class="icon-btn gemail-btn" title="Email me this group\'s report" style="padding:5px 10px">✉ Email</button>') + '<span class="worst-dot bg-' + worst + '"></span></div>' +
         '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:20px;height:20px"><path d="M9 6l6 6-6 6"/></svg>';
       head.onclick = () => { state.openGroups[name] = !open; renderContent(); };
       g.appendChild(head);
       const prb = head.querySelector(".profile-btn"); if (prb) prb.onclick = (e) => { e.stopPropagation(); openProviderProfile(items[0].entityKey, name); };
       const bb = head.querySelector(".binder-btn"); if (bb) bb.onclick = (e) => { e.stopPropagation(); printBinder(name); };
-      const pb = head.querySelector(".portal-btn"); if (pb) pb.onclick = (e) => { e.stopPropagation(); openProviderPortal(items[0].entityKey, name); };
       const peb = head.querySelector(".pemail-btn"); if (peb) peb.onclick = (e) => { e.stopPropagation(); openEmailTemplate(items[0]); };
       const geb = head.querySelector(".gemail-btn"); if (geb) geb.onclick = (e) => { e.stopPropagation(); emailGroupToSelf(name, items); };
       wireGroupCheck(head, items);
@@ -828,9 +841,13 @@
   }
 
   function renderFacility(c, arr) {
-    const facs = state.facility === "all" ? ["Castle Hills ER", "Frisco ER"] : [state.facility];
+    const knownFacilities = Array.from(new Set([].concat(
+      (window.SENTINEL_SEED && window.SENTINEL_SEED.facilities) || [],
+      arr.map(i => i.entity).filter(Boolean)
+    )));
+    const facs = state.facility === "all" ? knownFacilities : [state.facility];
     const sel = el("div", "fac-selector");
-    ["all", "Castle Hills ER", "Frisco ER"].forEach(f => {
+    ["all"].concat(knownFacilities).forEach(f => {
       const chip = el("button", "fac-chip" + (state.facility === f ? " on" : ""), f === "all" ? "All facilities" : esc(f));
       chip.onclick = () => { state.facility = f; renderContent(); };
       sel.appendChild(chip);
@@ -964,7 +981,7 @@
     wrap.innerHTML = '<div class="ent-ic">' + (isProv ? esc(initials(name)) : '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" style="width:20px;height:20px">' + ICONS.building + '</svg>') + '</div>' +
       '<div class="ent-info"><div class="ent-nm">' + esc(name) + '</div><div class="ent-meta">' + items.length + ' tracked items</div></div>' +
       '<div class="ent-actions">' + (isProv
-        ? '<button class="icon-btn" data-a="profile" title="Full credentialing profile in one table">👤 Profile</button><button class="icon-btn" data-a="pemail">✉ Email provider</button><button class="icon-btn" data-a="portal">🔗 Portal</button><button class="icon-btn" data-a="binder">🗂 Binder</button>' +
+        ? '<button class="icon-btn" data-a="profile" title="Full credentialing profile in one table">👤 Profile</button><button class="icon-btn" data-a="pemail">✉ Email provider</button><button class="icon-btn" data-a="binder">🗂 Binder</button>' +
           (isAdmin() ? '<button class="icon-btn" data-a="import" title="Copy documents from another OneDrive folder into this provider&#39;s Sentinel folder">📥 Import documents</button><button class="icon-btn" data-a="inact" title="Move to Inactive Providers (keeps the row, marks inactive)">📦 Mark inactive</button><button class="icon-btn danger" data-a="delprov" title="Permanently delete from the roster (recoverable from Recycle bin)">🗑 Delete</button>' : "")
         : '<button class="icon-btn" data-a="email">✉ Email</button><button class="icon-btn" data-a="binder">🗂 Binder</button>') +
       ((tab === "provider" || tab === "staff") ? '<button class="icon-btn" data-a="onboard">📋 Onboarding</button>' : '') + '</div>';
@@ -973,7 +990,6 @@
     bind("profile", () => openProviderProfile(it0.entityKey, name));
     bind("import", () => openImportDocs(it0.entityKey, name));
     bind("pemail", () => openEmailTemplate(it0));
-    bind("portal", () => openProviderPortal(it0.entityKey, name));
     bind("binder", () => printBinder(name));
     bind("email", () => emailGroupToSelf(name, items));
     bind("inact", () => removeProviderFromRoster(name, it0.entityKey));    // moves to Inactive sheet
@@ -2134,73 +2150,6 @@
   }
   function closeDrawer() { $("#drawer").classList.remove("show"); $("#drawerBack").classList.remove("show"); drawerItem = null; }
 
-  // ===== Free in-browser OCR (Tesseract.js) — read an expiry date off a scanned document =====
-  function ensureTesseract() {
-    return new Promise((resolve, reject) => {
-      if (window.Tesseract) return resolve();
-      const sc = document.createElement("script");
-      sc.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
-      sc.onload = resolve; sc.onerror = () => reject(new Error("Could not load the OCR engine."));
-      document.head.appendChild(sc);
-    });
-  }
-  function extractDates(text) {
-    const out = [];
-    const push = (y, mo, d) => { if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) out.push(y + "-" + String(mo).padStart(2, "0") + "-" + String(d).padStart(2, "0")); };
-    let m;
-    const re = /\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/g;
-    while ((m = re.exec(text))) { let y = +m[3]; if (y < 100) y += 2000; push(y, +m[1], +m[2]); }
-    const mon = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
-    const re2 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\b/gi;
-    while ((m = re2.exec(text))) push(+m[3], mon[m[1].toLowerCase().slice(0, 3)], +m[2]);
-    return [...new Set(out)].sort();
-  }
-  function ocrStat(msg) { const e = $("#ocrStatus"); if (e) e.innerHTML = msg; }
-  function ocrApply(it, dates, auto) {
-    if (!dates || !dates.length) { ocrStat("OCR ran but found no date in this document. Open “Edit” to set it."); return; }
-    const today = new Date().toISOString().slice(0, 10);
-    const fut = dates.filter(d => d >= today);
-    const pick = fut.length ? fut[fut.length - 1] : dates[dates.length - 1];
-    if (!it.expires) {
-      if (auto) { ocrStat("✓ Auto-read expiry " + fmtD(pick)); setOcrExpiry(it, pick, true); }
-      else pickOcrDate(it, dates);
-    } else {
-      const same = pick === it.expires;
-      ocrStat("📄 Document reads <b>" + fmtD(pick) + "</b> · current expiry " + fmtD(it.expires) +
-        (same ? " ✓ match" : ' — <button id="ocrUse" style="border:none;background:none;color:var(--accent);font-weight:800;cursor:pointer;text-decoration:underline;padding:0">use document date</button>'));
-      const u = $("#ocrUse"); if (u) u.onclick = () => setOcrExpiry(it, pick, false);
-    }
-  }
-  async function ocrReadDate(it, auto) {
-    if (!it || !it.fileLink || !/^https?:/i.test(it.fileLink)) { ocrStat("No document file to read."); return; }
-    if (!OVERLAY.ocr) OVERLAY.ocr = {};
-    if (auto && OVERLAY.ocr[it.id]) { ocrApply(it, OVERLAY.ocr[it.id].dates, true); return; }  // cached — read once
-    try {
-      ocrStat("🔎 Reading the document… (OCR, a few seconds)");
-      const r = await fetch("/api/data?ocr=" + encodeURIComponent(it.fileLink));
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || j.error) { ocrStat("⚠ " + esc(j.error ? (j.error + (j.detail ? " — " + j.detail : "")) : ("OCR failed " + r.status))); return; }
-      OVERLAY.ocr[it.id] = { dates: j.dates || [], at: new Date().toISOString().slice(0, 10) }; saveOverlay();
-      ocrApply(it, j.dates || [], auto);
-    } catch (e) { ocrStat("⚠ OCR error: " + esc(String(e.message || e).slice(0, 90))); }
-  }
-  function pickOcrDate(it, dates) {
-    const html = '<div class="item-sub" style="margin-bottom:10px">OCR read these dates from <b>' + esc(it.category) + '</b>. Pick the expiry:</div>' +
-      dates.map(d => '<button class="doc-link ocrd" data-d="' + d + '" style="display:block;width:100%;text-align:left;margin-bottom:6px">📅 ' + fmtD(d) + '</button>').join("") +
-      '<div class="item-sub" style="margin-top:8px;opacity:.65">Not the right one? Close this and use Edit to type it.</div>';
-    openModal("Read expiry (OCR)", html);
-    [...$("#modalInner").querySelectorAll(".ocrd")].forEach(b => b.onclick = () => { setOcrExpiry(it, b.dataset.d); closeModal(); });
-  }
-  function setOcrExpiry(it, iso, quiet) {
-    OVERLAY.edits[it.id] = Object.assign({}, it, OVERLAY.edits[it.id] || {}, { expires: iso, permanent: false, pending: false });
-    OVERLAY.logs[it.id] = (OVERLAY.logs[it.id] || []);
-    OVERLAY.logs[it.id].push({ text: "Expiry read via OCR — " + iso, date: new Date().toISOString().slice(0, 10) });
-    logAudit("edit", it, "expiry read via OCR: " + iso);
-    saveOverlay(); buildData(); render();
-    if ($("#drawer").classList.contains("show")) renderDrawerView(DATA.find(x => x.id === it.id) || Object.assign({}, it, { expires: iso }));
-    toast((quiet ? "📅 Auto-read expiry " : "Expiry set to ") + fmtD(iso) + (quiet ? " (OCR)" : " — read from the document."));
-  }
-
   function docSection(it) {
     let raw = it.fileLink || "";
     // Cloud: a MATCHED proof still pointing at a local-disk path → build its SharePoint
@@ -2212,7 +2161,7 @@
     const openable = isUrl || (!CLOUD && it.isFile);
     if (!openable) {
       const action = READONLY ? '' : (CLOUD
-        ? '<div class="item-sub" style="margin-top:4px">Use the <b>QR code</b> button below to scan &amp; upload one — it’ll appear here.</div>'
+        ? '<div class="item-sub" style="margin-top:4px">File the renewal in the master folder; Sentinel will attach it automatically.</div>'
         : '<button class="doc-link ghost" id="dAttach">Attach document</button>');
       return '<div class="dfield"><div class="dl">Proof document</div>' +
         '<div class="item-sub" style="margin-bottom:8px">⚠️ No proof document attached yet for this item.</div>' + action + '</div>';
@@ -2236,9 +2185,7 @@
     return '<div class="dfield"><div class="dl">Proof document</div>' +
       (fname ? '<div class="pdf-name">📄 ' + esc(fname) + '</div>' : '') + preview +
       '<div class="doc-btns"><a class="doc-link" href="' + esc(viewerHref) + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>Open file in Outlook</a>' +
-      ((!CLOUD && !READONLY) ? '<button class="doc-link ghost" id="dReadDate">📅 Read date</button>' : '') +
       '</div>' +
-      ((CLOUD && it.isFile && !READONLY) ? '<div id="ocrStatus" class="ocr-status">🔎 Checking the document…</div>' : '') +
       '</div>';
   }
   function wireAttach(it) {
@@ -2281,13 +2228,11 @@
       '<div class="dfield"><div class="dl">Renewal log</div><div id="logList">' + (logs.length ? logs.map(L => '<div class="log-entry">' + esc(L.text) + ' <small>— ' + L.date + '</small></div>').join("") : '<div class="item-sub">No log entries yet.</div>') + '</div>' +
       '<div style="display:flex;gap:6px;margin-top:8px"><input id="logIn" placeholder="Add a renewal note…" style="flex:1;padding:9px 11px;border-radius:9px;border:1px solid var(--hair);background:var(--surface-solid);color:var(--ink)"><button class="icon-btn" id="logAdd">Add</button></div></div>' +
       '</div>' +
-      '<div class="drawer-actions">' + (READONLY ? "" : '<button id="dRenew" class="save">✓ Mark renewed</button><button id="dEdit">Edit</button>') + '<button id="dWatch">' + (isWatched(it.id) ? "★ Watching" : "☆ Watch") + '</button><button id="dIcs">Calendar (.ics)</button><button id="dQR">QR code</button>' + (it.scope === "provider" ? '<button id="dEmail">✉️ Email provider</button>' : "") + (READONLY ? "" : '<button id="dDel" class="del">Delete</button>') + '</div>';
+      '<div class="drawer-actions">' + (READONLY ? "" : '<button id="dRenew" class="save">✓ Mark renewed</button><button id="dEdit">Edit</button>') + '<button id="dWatch">' + (isWatched(it.id) ? "★ Watching" : "☆ Watch") + '</button><button id="dIcs">Calendar (.ics)</button>' + (it.scope === "provider" ? '<button id="dEmail">✉️ Email provider</button>' : "") + (READONLY ? "" : '<button id="dDel" class="del">Delete</button>') + '</div>';
     $("#dClose").onclick = closeDrawer;
     if ($("#dEdit")) $("#dEdit").onclick = () => renderDrawerEdit(it, false);
     if ($("#dDel")) $("#dDel").onclick = () => { if (confirm("Delete this item?")) { deleteItem(it); } };
     $("#dIcs").onclick = () => exportICS(it);
-    // Auto-OCR every document on open (cached): fill the date if missing, verify if present.
-    if (CLOUD && it.isFile && !READONLY) setTimeout(() => ocrReadDate(it, true), 80);
     if ($("#dEmail")) $("#dEmail").onclick = () => openEmailTemplate(it);
     $("#dWatch").onclick = () => { toggleWatch(it.id); renderDrawerView(it); render(); };
     if ($("#dRenew")) $("#dRenew").onclick = () => markRenewed(it);
@@ -2305,7 +2250,6 @@
       const t = $("#tSave"); if (t) t.closest(".dfield").style.display = "none";
       const la = $("#logAdd"); if (la) { la.style.display = "none"; if ($("#logIn")) $("#logIn").style.display = "none"; }
     }
-    wireQR(it); wireReadDate(it);
   }
 
   function renderDrawerEdit(it, isNew) {
@@ -2465,17 +2409,6 @@
     return '<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#0f172a;line-height:1.55">' + out + '</div>';
   }
 
-  // A scan-to-upload QR block appended to every templated email.
-  function uploadQrBlock(it) {
-    const origin = (CLOUD ? location.origin : "https://sentinel-compliance-kappa.vercel.app");
-    const url = origin + "/upload.html?item=" + encodeURIComponent(it.id);
-    const qr = "https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=" + encodeURIComponent(url);
-    return '<div style="margin-top:18px;padding-top:14px;border-top:1px solid #e6ebf1;text-align:center;font-family:Segoe UI,Arial,sans-serif">' +
-      '<div style="font-size:13px;color:#0f172a;margin-bottom:8px">📲 Scan this code to upload your document right from your phone:</div>' +
-      '<img src="' + qr + '" alt="Upload QR code" width="180" height="180" style="border:1px solid #e6ebf1;border-radius:10px;padding:6px;background:#fff">' +
-      '<div style="font-size:12px;color:#64748b;margin-top:6px">or open: <a href="' + url + '">' + url + '</a></div></div>';
-  }
-
   // Email a single group's (facility / other / provider) compliance report to the SIGNED-IN user.
   function emailGroupToSelf(title, items) {
     const inbox = (window.SENTINEL_AUTH && window.SENTINEL_AUTH.email) || "your inbox";
@@ -2502,14 +2435,14 @@
     const ip = "width:100%;padding:9px;border-radius:8px;border:1px solid var(--hair);background:var(--surface-solid);color:var(--ink)";
     const opts = Object.keys(EMAIL_TEMPLATES).map(k => '<option value="' + k + '">' + EMAIL_TEMPLATES[k].label + '</option>').join("");
     openModal("Email provider (from template)",
-      '<div class="item-sub" style="margin-bottom:10px">This goes to the provider\'s email below (auto-detected — edit if needed). A scan-to-upload QR is added automatically.</div>' +
+      '<div class="item-sub" style="margin-bottom:10px">This goes to the provider\'s email below (auto-detected — edit if needed).</div>' +
       '<div class="dl">To — provider\'s email <span class="req">*</span></div><input id="etTo" value="' + esc(it.email || "") + '" placeholder="provider@email.com" style="' + ip + ';margin-bottom:10px">' +
       '<div class="dl">Template</div><select id="etSel" style="' + ip + ';margin-bottom:10px">' + opts + '</select>' +
       '<div id="etFields"></div>' +
       '<div class="dl" style="margin-top:8px">Preview</div><div id="etPrev" style="border:1px solid var(--hair);border-radius:10px;padding:12px;background:#fff;max-height:300px;overflow:auto"></div>' +
       '<div class="drawer-actions" style="border:none;padding:10px 0 0"><button class="save" id="etSend">Send to provider</button></div>');
     const vals = () => { const o = {}; [...$("#modalInner").querySelectorAll(".etf")].forEach(i => o[i.dataset.k] = i.value); return o; };
-    const refreshPrev = () => { $("#etPrev").innerHTML = tmplToHtml(EMAIL_TEMPLATES[cur].body(vals())) + uploadQrBlock(it); };
+    const refreshPrev = () => { $("#etPrev").innerHTML = tmplToHtml(EMAIL_TEMPLATES[cur].body(vals())); };
     const drawFields = () => {
       const t = EMAIL_TEMPLATES[cur], v = t.fill(it);
       $("#etFields").innerHTML = t.fields.map(([k, lab]) => '<div style="margin-bottom:8px"><div class="dl">' + lab + ' <span class="req">*</span></div><input class="etf" data-k="' + k + '" value="' + esc(v[k] || "") + '" style="' + ip + '"></div>').join("");
@@ -2526,8 +2459,7 @@
       const missing = [];
       [...$("#modalInner").querySelectorAll(".etf")].forEach(i => { const blank = !i.value.trim(); i.classList.toggle("err", blank); if (blank) missing.push(i.dataset.k); });
       if (!to || missing.length) { toast("All fields are required — please fill the highlighted field(s)."); return; }
-      const upUrl = (CLOUD ? location.origin : "https://sentinel-compliance-kappa.vercel.app") + "/upload.html?item=" + encodeURIComponent(it.id);
-      const payload = { to: to, subject: t.subj(v), html: tmplToHtml(t.body(v)) + uploadQrBlock(it), text: t.body(v) + "\n\nUpload your document here: " + upUrl };
+      const payload = { to: to, subject: t.subj(v), html: tmplToHtml(t.body(v)), text: t.body(v) };
       closeModal(); toast("Sending email to " + to + "…");
       const endpoint = CLOUD ? "/api/send-template" : "http://localhost:8765/api/send-template";
       fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
@@ -2941,7 +2873,7 @@
     const form = '<h3 style="margin:20px 0 10px;font-size:13px">Add a staff login</h3><div style="display:grid;gap:8px">' +
       '<input id="uLabel" placeholder="Name / label (e.g. Frisco DON, or Inspector)" style="' + ip + '">' +
       '<input id="uId" placeholder="Login ID" style="' + ip + '"><input id="uPw" type="password" placeholder="Password" style="' + ip + '">' +
-      '<div style="display:flex;gap:14px;flex-wrap:wrap">' + ["provider", "facility", "other"].map(t => '<label class="toggle-pill"><input type="checkbox" class="uTab" value="' + t + '" checked> ' + t + '</label>').join("") + '</div>' +
+      '<div style="display:flex;gap:14px;flex-wrap:wrap">' + ["provider", "staff", "facility", "other"].map(t => '<label class="toggle-pill"><input type="checkbox" class="uTab" value="' + t + '" checked> ' + t + '</label>').join("") + '</div>' +
       '<label class="toggle-pill"><input type="checkbox" id="uRO"> Read-only (can view, cannot edit) — use this for a share/inspector login</label>' +
       '<button class="save" id="uAdd" style="padding:10px;border-radius:9px;border:none;color:var(--accent-ink);background:var(--accent);font-weight:700">Add login</button></div>' +
       '<div class="item-sub" style="margin-top:10px">Stored in this browser (hashes only). To use these on other PCs, click “Download config.js” and replace the file.</div>' +
@@ -2962,46 +2894,6 @@
     };
   }
 
-  // ================= QR CODES =================
-  // Provider self-service portal: one QR/link showing the provider's whole checklist + per-item upload.
-  function openProviderPortal(ekey, name) {
-    const origin = (CLOUD ? location.origin : "https://sentinel-compliance-kappa.vercel.app");
-    const url = origin + "/provider.html?e=" + encodeURIComponent(ekey);
-    const qr = "https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=" + encodeURIComponent(url);
-    openModal("Provider portal — " + esc(name),
-      '<div style="text-align:center"><img src="' + qr + '" alt="QR code" style="width:240px;height:240px;border-radius:12px;border:1px solid var(--hair);background:#fff;padding:8px">' +
-      '<div class="item-sub" style="margin-top:12px;max-width:380px;margin-left:auto;margin-right:auto">Share this QR or link with <b>' + esc(name) + '</b>. They’ll see which documents are on file vs. needed, and can upload each one — no login required.</div>' +
-      '<div class="item-sub" style="margin-top:10px;word-break:break-all;opacity:.85"><a href="' + url + '" target="_blank" rel="noopener">' + esc(url) + '</a></div>' +
-      '<div style="margin-top:10px"><button class="icon-btn" id="ppCopy">Copy link</button></div></div>');
-    const c = $("#ppCopy"); if (c) c.onclick = () => { try { navigator.clipboard.writeText(url); toast("Link copied."); } catch (e) { toast("Copy not available — select the link."); } };
-  }
-  function wireQR(it) { const b = $("#dQR"); if (b) b.onclick = () => openQR(it); }
-  function openQR(it) {
-    if (CLOUD) {
-      const url = location.origin + "/upload.html?item=" + encodeURIComponent(it.id);
-      const qr = "https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=" + encodeURIComponent(url);
-      openModal("Scan to upload a document",
-        '<div style="text-align:center"><img src="' + qr + '" alt="QR code" style="width:240px;height:240px;border-radius:12px;border:1px solid var(--hair);background:#fff;padding:8px">' +
-        '<div style="margin-top:12px;font-weight:700">' + esc(it.category) + '</div><div class="item-sub">' + esc(it.entity) + '</div>' +
-        '<div class="item-sub" style="margin-top:12px;max-width:340px;margin:12px auto 0">Scan from <b>any</b> phone, anywhere — or use the link below if you can’t scan. Choose or photograph the document; it’s stored securely and attaches here.</div>' +
-        '<div class="item-sub" style="margin-top:10px"><b>Or open this link:</b></div>' +
-        '<div class="item-sub" style="margin-top:4px;word-break:break-all"><a href="' + url + '" target="_blank" rel="noopener">' + esc(url) + '</a></div></div>');
-      return;
-    }
-    toast("Building QR…");
-    fetch("http://localhost:8765/api/info").then(r => r.json()).then(info => {
-      const base = info.base || "http://localhost:8765";
-      const uploadURL = base + "/_Sentinel_Compliance/upload.html?item=" + encodeURIComponent(it.id);
-      const qr = "http://localhost:8765/api/qr?data=" + encodeURIComponent(uploadURL);
-      openModal("Scan to upload a document",
-        '<div style="text-align:center"><img src="' + qr + '" alt="QR code" style="width:240px;height:240px;border-radius:12px;border:1px solid var(--hair);background:#fff;padding:8px">' +
-        '<div style="margin-top:12px;font-weight:700">' + esc(it.category) + '</div><div class="item-sub">' + esc(it.entity) + '</div>' +
-        '<div class="item-sub" style="margin-top:12px;max-width:340px;margin-left:auto;margin-right:auto">Scan with your phone, then choose or photograph the document. It saves straight into this item’s folder and attaches here.</div>' +
-        '<div class="item-sub" style="margin-top:10px"><b>Or open this link:</b></div>' +
-        '<div class="item-sub" style="margin-top:4px;word-break:break-all"><a href="' + uploadURL + '" target="_blank" rel="noopener">' + esc(uploadURL) + '</a></div>' +
-        '<div class="item-sub" style="margin-top:8px">Phone must be on the same Wi-Fi as this PC. If it won’t connect, allow Python through the Windows firewall.</div></div>');
-    }).catch(() => openModal("QR code", '<div class="empty"><h3>Start the service</h3><p>Open Sentinel via <b>Start-Sentinel.bat</b> so the QR can be generated and your phone can reach the upload page.</p></div>'));
-  }
   function applyUploads(u) {
     if (!u) return;
     // /api/uploads-map answers HTTP 200 with { ok:false, message } when Graph errors. Treating
@@ -3024,28 +2916,6 @@
     if (CURRENT_USER && CURRENT_USER.tabs.indexOf(it.scope) < 0) return;
     const go = () => { state.tab = it.scope; render(); openDrawer(it, false); };
     if (UNLOCKED.has(it.scope)) go(); else promptTabCode(it.scope, go);
-  }
-
-  // ================= READ DATE FROM PDF =================
-  function wireReadDate(it) {
-    const b = $("#dReadDate"); if (!b) return;
-    if (READONLY || CLOUD) { b.style.display = "none"; return; }
-    b.onclick = () => {
-      toast("Reading the document…");
-      fetch("http://localhost:8765/api/read-dates", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ file: it.fileLink }) })
-        .then(r => r.json())
-        .then(d => { if (!d.ok || !d.dates || !d.dates.length) { toast("No dates found in that document."); return; } pickDate(it, d.dates); })
-        .catch(() => toast("Service not running — open via Start-Sentinel.bat."));
-    };
-  }
-  function pickDate(it, dates) {
-    const body = '<div class="item-sub" style="margin-bottom:10px">Dates found in <b>' + esc(it.fileLink.split("/").pop()) + '</b>. Pick the one to set as the expiry date:</div>' +
-      dates.map(d => '<div class="pal-item" data-d="' + esc(d) + '"><div class="pal-cat" style="flex:1">' + fmtD(d) + '</div><div class="item-sub">' + esc(d) + '</div></div>').join("");
-    openModal("Set expiry from document", body);
-    [...$("#modalInner").querySelectorAll(".pal-item")].forEach(r => r.onclick = () => {
-      const rec = Object.assign({}, it, { expires: r.dataset.d }); saveItem(rec, false); logAudit("edit", rec, "expiry read from PDF");
-      drawerItem = rec; closeModal(); renderDrawerView(rec); render(); toast("Expiry set to " + fmtD(r.dataset.d));
-    });
   }
 
   // ================= ASK-A-QUESTION (smart query) =================
