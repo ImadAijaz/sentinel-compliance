@@ -30,6 +30,13 @@ const SENTINEL = process.env.SENTINEL_DEST ||
   path.join(HOME, "Wellness & Care Group of Texas Inc", "Corporate Archives Directory - Documents", "Sama Farooqui", "Sentinel");
 const DATA = path.join(__dirname, "..", "data.json");
 const APPLY = process.argv.includes("--apply");
+// --live writes the dates into the app's OWN state folder instead of data.json. data.json only
+// reaches the dashboard through a git commit and a deploy, so a date found by the 15-minute
+// task would sit on this machine until someone shipped a release. _Sentinel/doc_dates.json is
+// read by /api/data at request time, so a renewed certificate reaches the board by itself.
+const LIVE = process.argv.includes("--live");
+const LIVE_OUT = path.join(HOME, "Wellness & Care Group of Texas Inc",
+  "Sama Farooqui - WCGTX Phyicians_04.08.2020", "_Sentinel", "doc_dates.json");
 const GREP = (process.argv.find(a => a.startsWith("--grep=")) || "").replace("--grep=", "");
 
 // Date reading comes from lib/graph.js — the SAME function the live scan uses. A private copy
@@ -84,6 +91,7 @@ function run() {
   }
 
   const changes = [];
+  const onDisk = new Map();      // itemId -> the furthest-forward date its documents carry
   for (const folder of folders) {
     // The credentials that own this folder: the longest item folder that prefixes it.
     let owner = null;
@@ -104,6 +112,12 @@ function run() {
       if (!hit) continue;
       const d = dateFromName(name);
       if (!d) continue;
+      // EVERY date found on disk, whatever data.json currently says. --live publishes this whole
+      // set so the app always holds the authoritative on-disk date. Publishing only the ones
+      // that beat data.json would have emitted nothing once data.json was baked, leaving the
+      // live path untested until the day a real renewal arrived.
+      const cur = onDisk.get(hit.id);
+      if (!cur || d > cur.to) onDisk.set(hit.id, { item: hit, to: d, file: name, folder });
       // Forward only. A newer document may arrive before an older one is tidied away, and a
       // credential must never be dragged backwards into looking expired by a stale copy.
       if (hit.expires && d <= hit.expires) continue;
@@ -132,7 +146,35 @@ function run() {
     console.log("     " + (c.item.entity + " / " + c.item.category).padEnd(52).slice(0, 52) + c.from + "  ->  " + c.to));
   if (final.length > 25) console.log("     ...and " + (final.length - 25) + " more");
 
-  if (!APPLY) { console.log("\n  Dry run - data.json not written. Re-run with --apply."); return; }
+  if (LIVE) {
+    const out = {};
+    for (const c of onDisk.values()) {
+      out[c.item.id] = {
+        expires: c.to, file: c.file,
+        link: "https://wcgtx.sharepoint.com/sites/CorporateArchivesDirectory/Shared%20Documents/Sama%20Farooqui/Sentinel/" +
+          c.folder.split("/").map(encodeURIComponent).join("/") + "/" + encodeURIComponent(c.file),
+      };
+    }
+    const payload = { generatedAt: new Date().toISOString(), count: Object.keys(out).length, dates: out };
+    try {
+      fs.mkdirSync(path.dirname(LIVE_OUT), { recursive: true });
+      const next = JSON.stringify(payload, null, 1);
+      const prev = fs.existsSync(LIVE_OUT) ? fs.readFileSync(LIVE_OUT, "utf8") : "";
+      const strip = (t) => t.replace(/"generatedAt":[^,]+,/, "");
+      // Only rewrite when something actually changed, so OneDrive is not handed an identical
+      // file to re-upload every 15 minutes forever.
+      if (prev && strip(prev) === strip(next)) {
+        console.log("\n  No change since the last run - " + path.basename(LIVE_OUT) + " left alone (" + payload.count + " dates).");
+      } else {
+        fs.writeFileSync(LIVE_OUT, next);
+        console.log("\n  Published " + payload.count + " document dates to _Sentinel/" + path.basename(LIVE_OUT));
+        console.log("  OneDrive uploads it; /api/data applies it on the next page load. No deploy needed.");
+      }
+    } catch (e) { console.error("  could not write " + LIVE_OUT + ": " + e.message); }
+    if (!APPLY) return;
+  }
+
+  if (!APPLY) { console.log("\n  Dry run - nothing written. Use --live (feeds the app) or --apply (bakes data.json)."); return; }
 
   const byId = new Map(final.map(c => [c.item.id, c]));
   let n = 0;

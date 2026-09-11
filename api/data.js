@@ -1036,6 +1036,31 @@ module.exports = async (req, res) => {
     // board announces itself instead of quietly looking normal.
     deltaSuppressed = items.deltaSuppressed || null;
   }
+  // Apply the dates read off the documents themselves. tools/refresh-data.js runs on the
+  // credentialing PC every 15 minutes, reads the expiry out of each document's filename and
+  // publishes the result to _Sentinel/doc_dates.json. Without this a renewed certificate only
+  // reached the board when the Graph delta scan happened to notice — which needs a dashboard
+  // tab open, works through a backlog a page at a time, and left COLA showing 17 Jan 2026 for
+  // hours after the 26 Feb 2028 certificate was already filed.
+  //
+  // FORWARD ONLY, and never over a human's own edit. A stale copy of a document must not be
+  // able to drag a current credential backwards into looking expired.
+  try {
+    const G = require("../lib/graph");
+    const dd = await G.readJsonAt(await G.accessToken(), G.drivePath("_Sentinel/doc_dates.json"));
+    if (dd && dd.dates) {
+      items = items.map(i => {
+        const d = dd.dates[i.id];
+        if (!d || !d.expires) return i;
+        if (i.expires && d.expires <= i.expires) return i;
+        return Object.assign({}, i, {
+          expires: d.expires, isFile: true, fileLink: d.link || i.fileLink,
+          permanent: false, pending: false, expiresFromDocument: true,
+        });
+      });
+    }
+  } catch (e) { /* the board must still render if this file is missing or Graph is unhappy */ }
+
   // Re-judge dated facility records at READ time, not just when the scanner next sees them.
   // The 62 dated facility documents on the board came from the baked data.json, and the Graph
   // delta scan only revisits files that CHANGE — so a fix applied only in api/scan.js would

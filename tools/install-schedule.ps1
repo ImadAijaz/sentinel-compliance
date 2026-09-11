@@ -31,7 +31,11 @@ if (-not (Test-Path $Script)) { Write-Error "Cannot find $Script"; return }
 
 # -NoProfile keeps startup fast; --quiet keeps it silent (everything still goes to the log file
 # under Sentinel\_sync\sync-log.txt).
-$action = New-ScheduledTaskAction -Execute $node -Argument "`"$Script`" --apply --quiet" -WorkingDirectory $Repo
+# Two steps per run: file the new documents in, then publish the dates read off them so the
+# dashboard picks up a renewal without waiting on the cloud scan or a deploy.
+$refresh = Join-Path (Join-Path $Repo 'tools') 'refresh-data.js'
+$action  = New-ScheduledTaskAction -Execute $node -Argument "`"$Script`" --apply --quiet" -WorkingDirectory $Repo
+$action2 = New-ScheduledTaskAction -Execute $node -Argument "`"$refresh`" --live" -WorkingDirectory $Repo
 
 # A daily trigger that repeats through the day. [TimeSpan]::MaxValue is rejected by the task
 # scheduler on this build ("Duration: P99999999DT23H59M59S ... out of range"), and a bare -Once
@@ -53,7 +57,7 @@ $settings = New-ScheduledTaskSettingsSet `
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+Register-ScheduledTask -TaskName $TaskName -Action @($action, $action2) -Trigger $trigger `
   -Settings $settings -Principal $principal `
   -Description "Files documents from the WCGTX master OneDrive folder into the Sentinel tree in Corporate Archives, every $Minutes minutes." -ErrorAction Stop | Out-Null
 
