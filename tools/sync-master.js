@@ -8,7 +8,7 @@
 // so the whole job is local file I/O — no Graph API, no rate limits, no timeouts, nothing
 // pushed through the cloud. OneDrive uploads the organized result to SharePoint on its own.
 //
-//   SOURCE (read only, never modified):
+//   MASTER WORKING TREE (read normally; Sentinel-originated uploads are copied back into it):
 //     ...\Sama Farooqui - WCGTX Phyicians_04.08.2020\
 //   DESTINATION (the tree the Sentinel dashboard reads):
 //     ...\Corporate Archives Directory - Documents\Sama Farooqui\Sentinel\
@@ -31,6 +31,8 @@
 const fs = require("fs");
 const path = require("path");
 const FACILITY = require("../lib/facility");
+const { matchByRules } = require("../lib/filerules");
+const { dateFromName } = require("../lib/graph");
 
 // ----------------------------------------------------------------------------- configuration
 const HOME = process.env.USERPROFILE || process.env.HOME || "";
@@ -40,6 +42,7 @@ const DST_ROOT = process.env.SENTINEL_DEST ||
   path.join(HOME, "Wellness & Care Group of Texas Inc", "Corporate Archives Directory - Documents", "Sama Farooqui", "Sentinel");
 const STATE_FILE = path.join(DST_ROOT, "_sync", "sync-state.json");
 const LOG_FILE = path.join(DST_ROOT, "_sync", "sync-log.txt");
+const UPLOADS_FILE = path.join(SRC_ROOT, "_Sentinel", "uploads.json");
 
 const ARGS = process.argv.slice(2);
 const APPLY = ARGS.includes("--apply");
@@ -72,6 +75,12 @@ const CATEGORY_ALIAS = {
 const HR_FOLDER = /^(z\.)?hr\b/i;
 const TEMPLATE_FOLDER = /^\.{0,2}(folder template|z\.folder template)$/i;
 const JUNK_FILE = /^(~\$|\.ds_store$|thumbs\.db$|desktop\.ini$)/i;
+const APP_UPLOAD = /^Sentinel_Upload_/i;
+
+let BAKED = { items: [] };
+try { BAKED = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "data.json"), "utf8")); } catch (e) {}
+const providerSourceByCanonical = new Map();
+const staffSourceByDest = new Map();
 
 // ------------------------------------------------------------------------------------ helpers
 const log = [];
@@ -256,21 +265,6 @@ function docKey(name) {
     .trim()
     .toLowerCase();
 }
-function dateFromName(name) {
-  let best = null, m;
-  const re = /\b(\d{1,4})[_.\-](\d{1,2})[_.\-](\d{2,4})\b/g;
-  while ((m = re.exec(String(name)))) {
-    let a = +m[1], b = +m[2], c = +m[3];
-    let y, mo, d;
-    if (a > 31) { y = a; mo = b; d = c; } else { mo = a; d = b; y = c < 100 ? 2000 + c : c; }
-    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
-      const iso = y + "-" + String(mo).padStart(2, "0") + "-" + String(d).padStart(2, "0");
-      if (!best || iso > best) best = iso;
-    }
-  }
-  return best;
-}
-
 // ------------------------------------------------------------------------- build the file plan
 const plan = [];      // { src, dst, family, reason }
 const skipped = { archive: [], template: [], hr: [], notAProvider: [] };
@@ -302,6 +296,7 @@ function addSite(siteDir, facility) {
       if (FACILITY.isArchivedSegment(group) || TEMPLATE_FOLDER.test(group)) continue;
       for (const person of safeDirs(path.join(SRC_ROOT, siteDir, group))) {
         if (FACILITY.isArchivedSegment(person) || TEMPLATE_FOLDER.test(person)) continue;
+        staffSourceByDest.set((facility + "|" + person).toLowerCase(), { siteDir, group, person });
         const files = [];
         walk(path.join(SRC_ROOT, siteDir, group, person), "", files, skipped, 0,
           archiveSinkFor(("Staff/" + facility + "/" + person.trim()).toLowerCase()));
@@ -338,6 +333,7 @@ function addProviders() {
     // silently becoming a second "Mohammad Khan" beside the real one is how a roster forks.
     const person = resolveProvider(folder);
     if (!person) { skipped.notAProvider.push(folder + "  (reads as: " + providerFolderName(folder) + ")"); continue; }
+    if (!providerSourceByCanonical.has(normKey(person))) providerSourceByCanonical.set(normKey(person), folder);
     const files = [];
     walk(path.join(SRC_ROOT, PROVIDER_ROOT, folder), "", files, skipped, 0,
       archiveSinkFor(("Provider/" + person).toLowerCase()));
@@ -367,6 +363,128 @@ function sameFile(dst, src) {
 }
 function ensureDir(d) { fs.mkdirSync(d, { recursive: true }); }
 
+// ---------------------------------------------------------------- app -> master document flow
+// Only files created by Sentinel use this prefix.  Pulling this narrow set back into the master
+// closes the two-way-sync gap without treating arbitrary SharePoint edits as authoritative or
+// trying to mirror/delete the whole 30 GB tree in both directions.
+const pullPlan = [];
+const pullSkipped = [];
+function cleanSeg(s, fallback) {
+  const v = String(s || "").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim();
+  return v || fallback;
+}
+function siteName(s) {
+  if (s === "Castle Hills ER") return "Castle Hills";
+  if (s === "Frisco ER") return "Frisco";
+  return s;
+}
+function siteDirFor(s) {
+  const wanted = siteName(s);
+  return Object.keys(SITES).find(k => SITES[k] === wanted) || null;
+}
+function staffPersonFor(item) {
+  const toks = String(item.entity || "").trim().split(/\s+/).filter(Boolean);
+  const last = toks.length ? toks[toks.length - 1] : "Staff";
+  const first = toks.slice(0, -1).join(" ");
+  const role = /front desk/i.test(item.role || "") ? "FD" : (item.role || "Staff");
+  return cleanSeg(last + (first ? ", " + first : "") + "_" + role, "Staff");
+}
+function relFromSharePointUrl(u) {
+  let s = String(u || "").split(/[?#]/)[0];
+  try { s = decodeURIComponent(s); } catch (e) {}
+  const m = s.match(/\/Sentinel\/(.+)$/i);
+  return m ? m[1].replace(/\\/g, "/").toLowerCase() : null;
+}
+function uploadItemsByRel() {
+  const out = new Map(), byId = new Map((BAKED.items || []).map(i => [i.id, i]));
+  let u = {};
+  try { u = JSON.parse(fs.readFileSync(UPLOADS_FILE, "utf8")); } catch (e) {}
+  for (const id of Object.keys(u || {})) {
+    const v = u[id] || {}, rel = relFromSharePointUrl(v.url);
+    if (rel) out.set(rel, byId.get(id) || { id, inferredOnly: true });
+  }
+  return out;
+}
+function uniquePullTarget(dst, src) {
+  if (!fs.existsSync(dst) || sameFile(dst, src)) return dst;
+  const ext = path.extname(dst), stem = dst.slice(0, -ext.length);
+  for (let n = 0; n < 100; n++) {
+    const alt = stem + "__Sentinel" + (n ? "_" + (n + 1) : "") + ext;
+    if (!fs.existsSync(alt) || sameFile(alt, src)) return alt;
+  }
+  return null;
+}
+function inferProviderItem(entity, fileName) {
+  const items = (BAKED.items || []).filter(i => i.scope === "provider" && normKey(i.entity) === normKey(entity));
+  return matchByRules(items, fileName) || (items.length ? items[0] : null);
+}
+function sourceTargetForUpload(f, rel, mapped) {
+  const parts = rel.split("/").filter(Boolean);
+  let item = mapped && !mapped.inferredOnly ? mapped : null;
+
+  if ((item && item.scope === "provider") || parts[0] === "Provider") {
+    if (!want("provider")) return null;
+    const entity = (item && item.entity) || parts[1];
+    if (!item) item = inferProviderItem(entity, f.name);
+    const category = cleanCategory((item && item.category) ||
+      (SOP_PHASES.includes(parts[2]) ? parts[3] : null) || "Misc");
+    const sourceFolder = providerSourceByCanonical.get(normKey(entity)) || cleanSeg(entity, "Unmatched Provider");
+    return path.join(SRC_ROOT, PROVIDER_ROOT, sourceFolder, category, f.name);
+  }
+
+  if (item && item.scope === "staff") {
+    if (!want("staff")) return null;
+    const site = siteName(item.staffFacility || item.facility || "Unassigned");
+    const person = staffPersonFor(item);
+    let src = staffSourceByDest.get((site + "|" + person).toLowerCase());
+    if (!src) {
+      const siteDir = siteDirFor(site); if (!siteDir) return null;
+      const role = String(item.role || "").toLowerCase();
+      const group = role.indexOf("rn") >= 0 ? "Nursing Staff" : role.indexOf("mid") >= 0 ? "Midshift" : "Front Office";
+      src = { siteDir, group, person };
+    }
+    return path.join(SRC_ROOT, src.siteDir, src.group, src.person, cleanCategory(item.category || "Misc"), f.name);
+  }
+  if (parts[0] === "Staff" && parts.length >= 3) {
+    if (!want("staff")) return null;
+    const known = staffSourceByDest.get((siteName(parts[1]) + "|" + parts[2]).toLowerCase());
+    if (known) return path.join(SRC_ROOT, known.siteDir, known.group, known.person, cleanSeg(parts[3], "Misc"), f.name);
+    const siteDir = siteDirFor(parts[1]); if (!siteDir) return null;
+    return path.join(SRC_ROOT, siteDir, "Sentinel App Uploads", cleanSeg(parts[2], "Staff"), cleanSeg(parts[3], "Misc"), f.name);
+  }
+
+  if ((item && (item.scope === "facility" || item.scope === "other")) || parts[0] === "State Readiness") {
+    if (!want("facility")) return null;
+    const site = siteName((item && item.entity) || parts[1]);
+    const siteDir = siteDirFor(site); if (!siteDir) return null;
+    let stateRoot = safeDirs(path.join(SRC_ROOT, siteDir)).find(n => /^\.{0,2}state requirements/i.test(n));
+    if (!stateRoot) stateRoot = "..State Requirements_Sentinel";
+    const classified = FACILITY.classifySection("", (item && item.category) || f.name);
+    const section = (parts[0] === "State Readiness" && parts[2]) || (classified && classified.section) || FACILITY.STATE_SECTIONS[0];
+    const category = cleanSeg((item && item.category) || parts[3] || "Other", "Other");
+    return path.join(SRC_ROOT, siteDir, stateRoot, "Sentinel App Uploads", cleanSeg(section, "Other"), category, f.name);
+  }
+  return null;
+}
+function addReverseUploads() {
+  const mapped = uploadItemsByRel(), files = [];
+  walk(DST_ROOT, "", files, { archive: [], template: [], hr: [] }, 0);
+  for (const f of files) {
+    if (!APP_UPLOAD.test(f.name)) continue;
+    const rel = path.relative(DST_ROOT, f.abs).replace(/\\/g, "/");
+    const item = mapped.get(rel.toLowerCase()) || null;
+    const raw = sourceTargetForUpload(f, rel, item);
+    if (!raw) { pullSkipped.push(rel); continue; }
+    const dst = uniquePullTarget(raw, f);
+    if (!dst) { pullSkipped.push(rel + " (too many conflicts)"); continue; }
+    if (!sameFile(dst, f)) pullPlan.push({ src: f, dst, family: (item && item.scope) || partsFamily(rel) });
+  }
+}
+function partsFamily(rel) {
+  const p = String(rel).split(/[\\/]/)[0];
+  return p === "Provider" ? "provider" : p === "Staff" ? "staff" : "facility";
+}
+
 async function run() {
   const t0 = Date.now();
   // The live roster loads asynchronously; the provider index is incomplete until it lands.
@@ -379,6 +497,7 @@ async function run() {
 
   for (const dir in SITES) addSite(dir, SITES[dir]);
   addProviders();
+  addReverseUploads();
 
   // Two source documents can carry the same name under different sub-folders of one category.
   // Filed flat they fight over a single destination: every run copies both, the loser always
@@ -489,12 +608,14 @@ async function run() {
   say("    updated documents to replace .......... " + toReplace.length);
   say("    already current, untouched ............ " + (plan.length - toCopy.length - toReplace.length));
   say("    replaced by a newer filing -> z.Superseded  " + superseded.length);
+  say("    Sentinel uploads -> master folders ....... " + pullPlan.length);
   say("    ----");
   Object.keys(counts).sort().forEach(k => say("    " + k.padEnd(10) + " documents seen in master: " + counts[k]));
   say("    skipped: " + skipped.archive.length + " archive folders, " + skipped.template.length +
       " template/reference folders, " + skipped.hr.length + " HR-restricted folders" +
       (INCLUDE_HR ? " (INCLUDED by --include-hr)" : " (use --include-hr to include)") +
       ", " + skipped.notAProvider.length + " folders that are not a known provider");
+  if (pullSkipped.length) say("    app uploads not safely attributable ....... " + pullSkipped.length);
   if (skipped.notAProvider.length) {
     say("    not recognised as a provider (nothing filed for these):");
     skipped.notAProvider.slice(0, 20).forEach(n => say("       " + n));
@@ -521,13 +642,19 @@ async function run() {
       superseded.slice(0, 8).forEach(f => { say("    " + f.rel); say("         replaced by: " + f.by); });
       if (superseded.length > 8) say("    …and " + (superseded.length - 8) + " more");
     }
+    if (pullPlan.length) {
+      say("");
+      say("  Sample of Sentinel uploads that would copy back to the master:");
+      pullPlan.slice(0, 8).forEach(p => say("    " + path.relative(SRC_ROOT, p.dst)));
+      if (pullPlan.length > 8) say("    ...and " + (pullPlan.length - 8) + " more");
+    }
     say("");
     say("  Dry run — nothing written. Re-run with --apply to do it.");
     writeLog();
     return;
   }
 
-  let copied = 0, replaced = 0, moved = 0, failed = 0;
+  let copied = 0, replaced = 0, moved = 0, pulled = 0, failed = 0;
   for (const p of toCopy.concat(toReplace)) {
     try {
       ensureDir(path.dirname(p.dst));
@@ -549,15 +676,24 @@ async function run() {
       moved++;
     } catch (e) { failed++; say("    !! could not archive " + f.name + " — " + e.message); }
   }
+  for (const p of pullPlan) {
+    try {
+      ensureDir(path.dirname(p.dst));
+      fs.copyFileSync(p.src.abs, p.dst);
+      fs.utimesSync(p.dst, new Date(), new Date(p.src.mtime));
+      if (fs.existsSync(p.dst)) pulled++;
+    } catch (e) { failed++; say("    !! could not copy upload back to master " + p.src.name + " — " + e.message); }
+  }
 
   const state = loadState();
   state.lastRun = new Date().toISOString();
-  state.lastResult = { copied, replaced, moved, failed, seen: plan.length };
+  state.lastResult = { copied, replaced, moved, pulled, failed, seen: plan.length };
   try { ensureDir(path.dirname(STATE_FILE)); fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch (e) {}
 
   say("");
   say("  DONE in " + Math.round((Date.now() - t0) / 1000) + "s — " + copied + " copied, " +
       replaced + " replaced, " + moved + " superseded, " + failed + " failed.");
+  if (pulled) say("  " + pulled + " Sentinel upload(s) copied back into the master working folders.");
   say("  OneDrive will upload these to SharePoint; the dashboard picks them up on its next scan.");
   writeLog();
 }
