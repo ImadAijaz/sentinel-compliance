@@ -35,8 +35,7 @@ const APPLY = process.argv.includes("--apply");
 // task would sit on this machine until someone shipped a release. _Sentinel/doc_dates.json is
 // read by /api/data at request time, so a renewed certificate reaches the board by itself.
 const LIVE = process.argv.includes("--live");
-const LIVE_OUT = path.join(HOME, "Wellness & Care Group of Texas Inc",
-  "Sama Farooqui - WCGTX Phyicians_04.08.2020", "_Sentinel", "doc_dates.json");
+const LIVE_OUT = process.env.SENTINEL_LIVE_STATE || path.join(SENTINEL, "_State", "doc_dates.json");
 const GREP = (process.argv.find(a => a.startsWith("--grep=")) || "").replace("--grep=", "");
 
 // Date reading comes from lib/graph.js — the SAME function the live scan uses. A private copy
@@ -73,6 +72,21 @@ function relOf(url) {
   const m = u.match(/\/Sentinel\/(.+)$/);
   return m ? m[1] : null;
 }
+function relsForItem(it) {
+  if (it && it.scope === "staff") {
+    const site = it.staffFacility || it.facility || "Unassigned";
+    const siteDir = site === "Castle Hills ER" ? "Castle Hills" : site === "Frisco ER" ? "Frisco" : site;
+    const toks = String(it.entity || "").trim().split(/\s+/).filter(Boolean);
+    const last = toks.length ? toks[toks.length - 1] : "Staff";
+    const first = toks.slice(0, -1).join(" ");
+    const base = "Staff/" + siteDir + "/" + last + (first ? ", " + first : "") + "_";
+    const role = it.role || "Staff", roles = [role];
+    if (/front desk/i.test(role)) roles.push("FD");
+    return Array.from(new Set(roles.map(r => base + r)));
+  }
+  const rel = relOf(it && (it.folderLink || it.fileLink));
+  return rel ? [rel] : [];
+}
 
 function run() {
   if (!fs.existsSync(SENTINEL)) { console.error("Sentinel folder not found: " + SENTINEL); process.exit(2); }
@@ -84,14 +98,14 @@ function run() {
   const itemsByFolder = new Map();
   for (const it of data.items || []) {
     if (it.supplemental) continue;                        // supplementals ARE the document
-    const rel = relOf(it.folderLink || it.fileLink);
-    if (!rel) continue;
-    if (!itemsByFolder.has(rel)) itemsByFolder.set(rel, []);
-    itemsByFolder.get(rel).push(it);
+    for (const rel of relsForItem(it)) {
+      if (!itemsByFolder.has(rel)) itemsByFolder.set(rel, []);
+      itemsByFolder.get(rel).push(it);
+    }
   }
 
   const changes = [];
-  const onDisk = new Map();      // itemId -> the furthest-forward date its documents carry
+  const onDisk = new Map();      // itemId -> the newest evidence/current document found on disk
   for (const folder of folders) {
     // The credentials that own this folder: the longest item folder that prefixes it.
     let owner = null;
@@ -101,7 +115,7 @@ function run() {
     if (!owner) continue;
     const items = itemsByFolder.get(owner);
     for (const name of disk.get(folder)) {
-      const hit = matchByRules(items, name);
+      const hit = matchByRules(items.filter(i => i.scope !== "other"), folder + "/" + name);
       if (process.env.RD_DEBUG && new RegExp(process.env.RD_DEBUG, "i").test(name)) {
         console.log("DEBUG " + name);
         console.log("   folder = " + folder);
@@ -122,6 +136,28 @@ function run() {
       // credential must never be dragged backwards into looking expired by a stale copy.
       if (hit.expires && d <= hit.expires) continue;
       changes.push({ item: hit, from: hit.expires || "(none)", to: d, file: name, folder });
+    }
+
+    // One event document can satisfy more than one recurring obligation (a generator load test
+    // is evidence for both the semi-annual and annual rows), so recurring matches are deliberately
+    // handled as a set instead of the single-hit credential matcher above.
+    for (const name of disk.get(folder)) {
+      const recs = FAC.matchRecurringObligations(items, folder + "/" + name, name);
+      for (const rec of recs) {
+        if (!rec.recordDate) continue;                 // no defensible date in the path/name
+        const cur = onDisk.get(rec.item.id);
+        if (!cur || !cur.recordDate || rec.recordDate > cur.recordDate) {
+          onDisk.set(rec.item.id, {
+            item: rec.item, to: rec.nextDue, recordDate: rec.recordDate,
+            file: name, folder, recurring: true, cadenceMonths: rec.cadenceMonths,
+            cadenceNote: rec.note || null,
+          });
+        }
+        if (rec.nextDue && (!rec.item.expires || rec.nextDue > rec.item.expires)) {
+          changes.push({ item: rec.item, from: rec.item.expires || "(none)", to: rec.nextDue,
+            recordDate: rec.recordDate, file: name, folder, recurring: true });
+        }
+      }
     }
   }
 
@@ -151,6 +187,10 @@ function run() {
     for (const c of onDisk.values()) {
       out[c.item.id] = {
         expires: c.to, file: c.file,
+        recordDate: c.recordDate || null,
+        recurring: !!c.recurring,
+        cadenceMonths: c.cadenceMonths || null,
+        cadenceNote: c.cadenceNote || null,
         link: "https://wcgtx.sharepoint.com/sites/CorporateArchivesDirectory/Shared%20Documents/Sama%20Farooqui/Sentinel/" +
           c.folder.split("/").map(encodeURIComponent).join("/") + "/" + encodeURIComponent(c.file),
       };
@@ -167,7 +207,7 @@ function run() {
         console.log("\n  No change since the last run - " + path.basename(LIVE_OUT) + " left alone (" + payload.count + " dates).");
       } else {
         fs.writeFileSync(LIVE_OUT, next);
-        console.log("\n  Published " + payload.count + " document dates to _Sentinel/" + path.basename(LIVE_OUT));
+        console.log("\n  Published " + payload.count + " document dates to Sentinel/_State/" + path.basename(LIVE_OUT));
         console.log("  OneDrive uploads it; /api/data applies it on the next page load. No deploy needed.");
       }
     } catch (e) { console.error("  could not write " + LIVE_OUT + ": " + e.message); }
@@ -185,6 +225,11 @@ function run() {
     it.fileLink = "https://wcgtx.sharepoint.com/sites/CorporateArchivesDirectory/Shared%20Documents/Sama%20Farooqui/Sentinel/" +
       c.folder.split("/").map(encodeURIComponent).join("/") + "/" + encodeURIComponent(c.file);
     it.isFile = true;
+    if (c.recordDate) {
+      it.recordDate = c.recordDate;
+      it.recurringFromDocument = true;
+      it.notes = "Latest evidence: " + c.recordDate + (c.to ? "; next due: " + c.to : "; cadence not configured");
+    }
     n++;
   }
   data.refreshedFromDisk = new Date().toISOString();
