@@ -311,6 +311,131 @@ module.exports = async (req, res) => {
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); return; }
   }
 
+  // ---- Facility document sync ----------------------------------------------------------------
+  // The facility documents on the dashboard come from
+  //   Sama Farooqui/Sentinel/State Readiness/<Facility>/<NN. Section>/
+  // but the people who maintain them work somewhere else entirely — the legacy
+  // "..State Requirements_<SITE>" tree, and a personal OneDrive the team library never sees.
+  // Measured 2026-09-11: the team library matched the legacy tree byte-for-byte while the live
+  // COLA accreditation was two years newer than the one the board was showing. This pulls the
+  // real folder in and files each document into the right one of the 14 sections.
+  //
+  //   GET  ?facsync=preview&facility=<name>&src=<folder link>   -> the filing plan, nothing copied
+  //   POST ?facsync=run&facility=<name>&src=<folder link>       -> copy (idempotent, resumable)
+  //   GET  ?facsync=sources                                     -> saved links per facility
+  //   POST ?facsync=save   {facility, src}                      -> remember a link for autosync
+  //   POST ?facsync=auto                                        -> run every saved link (cron)
+  //   GET  ?facsync=reorg                                       -> documents filed in the wrong
+  //   POST ?facsync=reorg-run                                      section, and move them
+  //
+  // ALWAYS a copy from the source — never a move, never a delete. The only thing that ever
+  // moves is a document already inside Sentinel's own tree that is in the wrong section, and
+  // only when ?facsync=reorg-run is called explicitly.
+  const facsync = url.searchParams.get("facsync");
+  if (facsync) {
+    if (!s || !s.admin) {
+      const { isCronRequest } = require("../lib/session");
+      if (!(facsync === "auto" && isCronRequest(req))) { res.status(403).json({ error: "admins only" }); return; }
+    }
+    try {
+      const G = require("../lib/graph");
+      const FS = require("../lib/facsync");
+      const token = await G.accessToken();
+      // Vercel will cut the request off; stop cleanly and report what is left instead.
+      const deadline = Date.now() + 45000;
+      const readBody = async () => {
+        let b = ""; await new Promise(r => { req.on("data", c => b += c); req.on("end", r); });
+        try { return JSON.parse(b || "{}"); } catch (e) { return {}; }
+      };
+      const bad = (m, extra) => { res.status(400).json(Object.assign({ error: m }, extra || {})); };
+
+      if (facsync === "sources") { res.status(200).json(await FS.readSources(token)); return; }
+
+      if (facsync === "save") {
+        const b = await readBody();
+        const fac = String(b.facility || "").trim();
+        if (!FS.isFacility(fac)) { bad("facility must be one of: " + FS.facilities().join(", "), { got: fac }); return; }
+        if (!String(b.src || "").trim()) { bad("paste the folder link"); return; }
+        const cur = await FS.saveSource(token, fac, b.src, (s && s.email) || "cron");
+        res.status(200).json({ ok: true, saved: fac, facilities: Object.keys(cur.facilities) });
+        return;
+      }
+
+      // ---- refile documents already inside Sentinel into the section they belong in ----
+      if (facsync === "reorg" || facsync === "reorg-run") {
+        const b = facsync === "reorg-run" ? await readBody() : {};
+        const wanted = String(url.searchParams.get("facility") || b.facility || "").trim();
+        const facs = wanted ? [wanted] : FS.facilities();
+        for (const f of facs) if (!FS.isFacility(f)) { bad("unknown facility: " + f); return; }
+        let moves = [];
+        for (const f of facs) moves = moves.concat(await FS.misfiled(token, f));
+        if (facsync === "reorg") {
+          const groups = {};
+          moves.forEach(m => { const k = m.from + "  →  " + m.to; (groups[k] = groups[k] || []).push(m.name); });
+          res.status(200).json({
+            ok: true, mode: "preview", misfiled: moves.length,
+            groups: Object.keys(groups).map(k => ({ move: k, count: groups[k].length, sample: groups[k].slice(0, 8) })),
+            note: "Nothing has moved. These documents are already inside Sentinel, but filed in a section that does not match what they are.",
+          });
+          return;
+        }
+        const r = await FS.reorganize(token, moves, deadline);
+        res.status(200).json(Object.assign({ ok: true, mode: "run" }, r, {
+          note: "Documents were moved WITHIN Sentinel's own folders. Nothing in the working folder was touched.",
+        }));
+        return;
+      }
+
+      // ---- preview / run / auto ----
+      if (facsync === "auto") {
+        res.status(200).json(Object.assign({ ok: true, mode: "auto" }, await FS.syncSavedFacilities({ budgetMs: 45000 })));
+        return;
+      }
+      if (facsync !== "preview" && facsync !== "run") {
+        bad("facsync must be preview, run, auto, save, sources, reorg or reorg-run");
+        return;
+      }
+      const fac = String(url.searchParams.get("facility") || "").trim();
+      const src = String(url.searchParams.get("src") || "").trim();
+      if (!FS.isFacility(fac)) { bad("facility must be one of: " + FS.facilities().join(", "), { got: fac }); return; }
+      if (!src) { bad("paste the folder's OneDrive/SharePoint link"); return; }
+
+      const p = await FS.plan(token, fac, src, deadline);
+      if (p.error) { res.status(502).json({ ok: false, facilities: [{ facility: fac, error: p.error, detail: p.detail }] }); return; }
+
+      if (facsync === "preview") {
+        const bySection = {};
+        p.toCopy.forEach(f => { (bySection[f.section] = bySection[f.section] || []).push(f.name); });
+        res.status(200).json({
+          ok: true, mode: "preview", facilities: [{
+            facility: fac, source: p.source.name, sourceUrl: p.source.webUrl,
+            found: p.files.length, toCopy: p.toCopy.length, alreadyThere: p.already.length,
+            misfiledHere: p.already.filter(a => a.misfiled).length,
+            archiveFoldersSkipped: p.skippedFolders,
+            sections: require("../lib/facility").STATE_SECTIONS.filter(sec => bySection[sec]).map(sec => ({
+              section: sec, count: bySection[sec].length, files: bySection[sec].slice(0, 12),
+            })),
+            datedInThePast: p.datedInThePast.slice(0, 20),
+            note: "Nothing has been copied. Files are COPIED into Sentinel — the originals stay exactly where they are.",
+          }],
+        });
+        return;
+      }
+
+      const r = await FS.copyIn(token, fac, p, deadline, 120);
+      res.status(200).json({
+        ok: true, mode: "run", facilities: [Object.assign({
+          facility: fac, source: p.source.name, found: p.files.length, alreadyThere: p.already.length,
+          datedInThePast: p.datedInThePast.slice(0, 20),
+        }, r, {
+          note: "Copies finish on Microsoft's side within a minute or so. Nothing was moved or deleted in the working folder."
+            + (r.remaining > 0 ? " Run it again to continue where it stopped." : ""),
+        })],
+      });
+      return;
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); return; }
+  }
+
   // ---- "Why can't I see this provider?" ------------------------------------------------------
   // GET/POST /api/data?whois=<name>   (admin) — traces one name through every stage:
   //   live Excel (Credentials / Inactive)  ->  baked data.json  ->  cached delta  ->  dashboard.
@@ -910,6 +1035,45 @@ module.exports = async (req, res) => {
     // Carry the "we ignored the live roster cache" warning through to the client, so a stale
     // board announces itself instead of quietly looking normal.
     deltaSuppressed = items.deltaSuppressed || null;
+  }
+  // Re-judge dated facility records at READ time, not just when the scanner next sees them.
+  // The 62 dated facility documents on the board came from the baked data.json, and the Graph
+  // delta scan only revisits files that CHANGE — so a fix applied only in api/scan.js would
+  // never have reached the documents already sitting there. Minutes, agendas, inspection
+  // reports, service calls, "as of" snapshots, emails and incident reports keep their date as a
+  // record, but stop running an expiry clock and stop counting as expired.
+  {
+    const FACL = require("../lib/facility");
+    const partsOf = (i) => {
+      const u = decodeURIComponent(String(i.fileLink || ""));
+      const m = u.match(/Sentinel\/(.+)$/);
+      const segs = m ? m[1].split("/") : [];
+      return { folder: segs.slice(0, -1).join("/"), name: segs.length ? segs[segs.length - 1] : "" };
+    };
+    items = items.map(i => {
+      // ONLY supplemental records — documents the scanner surfaced because they sit in a
+      // folder, with no credential behind them. A TRACKED credential is never rewritten here:
+      // 72 of the 83 expired items whose proof file sits in an archive folder are real expired
+      // BLS certs, DEA registrations and medical licences. Their old certificate being filed
+      // under "z.Expired Docs" is correct filing — the credential really is expired, and
+      // silencing those would hide the exact findings this dashboard exists to raise.
+      if (!i.supplemental || !i.expires) return i;
+      const p = partsOf(i);
+      // A superseded copy parked in an archive folder is not a live obligation.
+      if (FACL.isArchivedPath(p.folder)) {
+        return Object.assign({}, i, {
+          expires: null, permanent: true, recordDate: i.expires, datedRecord: true, archivedCopy: true,
+          notes: "Superseded copy, filed in an archive folder (" + i.expires + "). Kept for the record.",
+        });
+      }
+      if ((i.scope === "facility" || i.scope === "other") && FACL.isNonExpiring(p.name)) {
+        return Object.assign({}, i, {
+          expires: null, permanent: true, recordDate: i.expires, datedRecord: true,
+          notes: "Dated record — " + i.expires + ". This kind of document does not expire.",
+        });
+      }
+      return i;
+    });
   }
   const keys = new Set(items.map(i => i.entityKey));
   const entityFiles = {};

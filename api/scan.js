@@ -5,6 +5,7 @@
 // Results -> _Sentinel/auto_detected.json, which /api/uploads-map merges into the dashboard.
 const { accessToken, docsRoot, docsPathFromUrl, encPath, drivePath, readJsonAt, writeJsonAt, dateFromName } = require("../lib/graph");
 const { applyRosterDelta } = require("../lib/delta");
+const FAC = require("../lib/facility");
 // Re-read data.json fresh on each invocation (don't cache via require — warm lambdas would
 // keep a stale index, missing newly added providers/items).
 const fs = require("fs");
@@ -46,10 +47,12 @@ function cleanTitle(fn) {
   base = base.replace(/[_\s]+\d{1,4}[_\-.]\d{1,2}[_\-.]\d{1,4}.*$/, "").trim();
   return (base.replace(/_/g, " ").replace(/^[-_.,\s]+|[-_.,\s]+$/g, "")) || fn.replace(/\.[^.]+$/, "");
 }
-function isArchivedPath(rel) {
-  const p = "/" + String(rel || "").toLowerCase().replace(/\\/g, "/") + "/";
-  return /\/(z\.|zz|old[ _]|expired|\.inactive)/.test(p);
-}
+// Archive-folder test now lives in lib/facility.js and is shared with the facility sync, so the
+// provider tree ("z.Expired Docs") and the facility tree ("Z_Expired Documents_FriscoER") are
+// judged by the same rule. The old private copy here only knew the dotted spelling, was never
+// actually called, and the live skip below used a third regex that missed the facility form —
+// which is how a superseded 2025 facility licence reached the board as an expired credential.
+const isArchivedPath = FAC.isArchivedPath;
 // Given a Sentinel-relative folder path like "Sama Farooqui/Sentinel/Provider/Afia Umber/1. Application..."
 // return { entity, entityKey, scope, phaseIdx, sectionLabel } if recognizable, else null.
 function deriveEntity(folderRel) {
@@ -108,7 +111,12 @@ const FILE_RULES = {
   "Malpractice / COI Insurance": "malpractice|certificate of insurance|\\bcoi\\b|tail coverage|policy",
   // Board cert files are commonly named ONLY by the board acronym (e.g. "ABEM_2027.pdf"),
   // so we accept the common boards in addition to literal "board"/"recert".
-  "Board Certification": "board|recert|\\b(abem|abfm|abim|abps|aobem|aobim|aboem|abog|abpn|abs|abucm|aagp|abo|abr)\\b"
+  "Board Certification": "board|recert|\\b(abem|abfm|abim|abps|aobem|aobim|aboem|abog|abpn|abs|abucm|aagp|abo|abr)\\b",
+  // Facility credentials. Without these, matchItem() had no rule for ANY facility category, so
+  // every facility document fell through to the generic supplemental path and its filename date
+  // became an expiry. Now a renewed CLIA/COLA/licence attaches to the credential it is evidence
+  // for, and its date refreshes that credential instead of creating a second card beside it.
+  ...FAC.FACILITY_FILE_RULES,
 };
 // Normalize a filename for rule matching. Underscores were handled but hyphens and dots were
 // not, so "DEA-Cert-2027.pdf" and "Medical.License.2027.pdf" matched nothing while the
@@ -265,7 +273,7 @@ module.exports = async (req, res) => {
         const folderRel = relFromParent((v.parentReference && v.parentReference.path) || "");
         // Only the Sentinel tree, case-insensitive + boundary-anchored, and skip archive subpaths.
         if (!folderRel || !/(^|\/)Sentinel(\/|$)/i.test(folderRel)) continue;
-        if (/(^|\/)(zz?\.|old[_ ]|expired|\.inactive)/i.test(folderRel)) continue;
+        if (isArchivedPath(folderRel)) continue;
         // Folder events: a new/deleted Provider/<Name>/ folder updates the master Excel roster.
         // The folder appears as a Graph item with .folder set, parented at the Provider directory.
         if (v.folder && /(^|\/)Sentinel\/Provider$/i.test(folderRel)) {
@@ -362,7 +370,14 @@ module.exports = async (req, res) => {
         const ext = (v.name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
         const supportedExts = ["pdf","jpg","jpeg","png","webp","gif","tif","tiff","heic","heif","doc","docx","xls","xlsx","ppt","pptx"];
         if (!ext || !supportedExts.includes(ext[1])) continue;
-        const expFromName = dateFromName(v.name || "");
+        const nameDate2 = dateFromName(v.name || "");
+        // Minutes, agendas, inspection reports, service calls, "as of" snapshots, emails and
+        // incident reports carry the date the thing HAPPENED, not a date they stop being valid.
+        // Treating that as an expiry turned every set of meeting minutes red the day after the
+        // meeting: 54 of the 62 dated facility documents on the board were records of this kind.
+        // They keep their date — shown as a dated record — but no longer run an expiry clock.
+        const eventOnly = FAC.isNonExpiring(v.name || "");
+        const expFromName = eventOnly ? null : nameDate2;
         const rec = {
           id: slug(ent.entityKey, "supp", (v.name || "").replace(/\.[^.]+$/, "")),
           scope: ent.scope,
@@ -384,7 +399,11 @@ module.exports = async (req, res) => {
           liveAdded: true,
           permanent: !expFromName,
           active: true,
-          notes: "Supplemental document (detected live by background scan)",
+          recordDate: eventOnly ? nameDate2 : null,
+          datedRecord: eventOnly && !!nameDate2,
+          notes: eventOnly
+            ? (nameDate2 ? "Dated record — " + nameDate2 + ". This kind of document does not expire." : "Record document — no expiry.")
+            : "Supplemental document (detected live by background scan)",
         };
         supplemental[key] = rec;
         suppChanged++;

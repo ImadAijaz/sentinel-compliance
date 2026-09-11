@@ -83,10 +83,20 @@ module.exports = async (req, res) => {
       const { regenerateRoster } = require("../lib/regen");
       regenInfo = await regenerateRoster(await accessToken());
     } catch (e) { regenInfo = { error: String(e.message || e).slice(0, 200) }; }
+    // Facility document autosync. The facility documents this board reads are a copy of a
+    // folder someone else maintains, so without this they drift — the COLA accreditation on
+    // the wall was two years newer than the one the board was showing. Runs here rather than on
+    // its own cron because Vercel cron paths can't carry a query string, and the Hobby plan is
+    // already at its 12-function ceiling. Silent no-op until a source folder has been saved.
+    let facSync = null;
+    try {
+      const { syncSavedFacilities } = require("../lib/facsync");
+      facSync = await syncSavedFacilities();
+    } catch (e) { facSync = { error: String(e.message || e).slice(0, 200) }; }
     // Automatic digest emails are DISABLED. The 15-day email cadence is handled by the user's
     // own scheduled routine, not the app — so the daily cron now ONLY refreshes roster/staff
     // data silently and never emails anyone (previously it emailed every allowed user daily,
     // and twice over because the cron runs on both the delta and kappa deployments).
-    res.status(200).json({ ok: true, sent: 0, emailsDisabled: true, regen: regenInfo });
+    res.status(200).json({ ok: true, sent: 0, emailsDisabled: true, regen: regenInfo, facilityDocs: facSync });
   } catch (e) { res.status(200).json({ ok: false, message: String(e.message || e) }); }
 };
