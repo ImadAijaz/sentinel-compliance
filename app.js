@@ -1524,127 +1524,6 @@
     };
   }
 
-  // ---- Facility document sync -----------------------------------------------------------
-  // The facility documents this board reads are a COPY. The people who actually maintain them
-  // work in a different folder, so the board drifts behind without anyone noticing — the COLA
-  // accreditation on the wall was two years newer than the one shown here. Paste the working
-  // folder's link once; from then on the nightly job keeps this in step with it.
-  function openFacilitySync(facility) {
-    if (!isAdmin()) { toast("Admins only."); return; }
-    const html =
-      '<div class="item-sub" style="margin-bottom:12px">Copies the latest documents from the folder your team actually works in into ' +
-      '<b>' + esc(facility) + '</b>&rsquo;s Sentinel folders, filing each one into the right section. ' +
-      'Files are <b>copied, never moved</b> — nothing in the working folder is changed or deleted.</div>' +
-      '<div style="font-size:12px;font-weight:700;margin-bottom:5px">1. Paste the working folder link</div>' +
-      '<div class="item-sub" style="margin-bottom:6px">In OneDrive, open the folder, click <b>Share</b> &rarr; <b>Copy link</b>, and paste it here.</div>' +
-      '<input id="fsSrc" placeholder="https://wcgtx-my.sharepoint.com/:f:/p/..." style="width:100%;padding:8px 10px;border:1px solid var(--hair,#e2e8f0);border-radius:8px;font-size:12.5px;box-sizing:border-box">' +
-      '<label style="display:flex;align-items:center;gap:7px;margin-top:9px;font-size:12.5px">' +
-      '<input type="checkbox" id="fsAuto" checked> Keep this in sync automatically (nightly)</label>' +
-      '<div style="display:flex;gap:8px;margin-top:14px">' +
-      '<button class="btn-primary" id="fsPrev" style="flex:1">Preview</button>' +
-      '<button class="btn-primary" id="fsRun" style="flex:1;background:#b45309" disabled>Copy files in</button></div>' +
-      '<div style="margin-top:10px"><button class="icon-btn" id="fsReorg" style="width:100%">🗂 Check filing of documents already here</button></div>' +
-      '<div id="fsOut" style="margin-top:14px"></div>';
-    const body = openModal("Sync documents — " + esc(facility), html);
-    const out = body.querySelector("#fsOut");
-    const srcEl = body.querySelector("#fsSrc"), autoEl = body.querySelector("#fsAuto");
-    const prevBtn = body.querySelector("#fsPrev"), runBtn = body.querySelector("#fsRun"), reorgBtn = body.querySelector("#fsReorg");
-    const err = (m) => { out.innerHTML = '<div style="color:#b91c1c;font-size:12.5px">' + esc(m) + '</div>'; };
-    const busy = (m) => { out.innerHTML = '<div class="item-sub">' + esc(m) + '</div>'; };
-
-    // Prefill a previously saved link so this is one click next time.
-    fetch("/api/data?facsync=sources&_t=" + Date.now(), { cache: "no-store" }).then(r => r.json()).then(d => {
-      const hit = d && d.facilities && d.facilities[facility];
-      if (hit && hit.src && !srcEl.value) srcEl.value = hit.src;
-    }).catch(() => {});
-
-    const qs = (mode) => "/api/data?facsync=" + mode + "&facility=" + encodeURIComponent(facility) +
-      "&src=" + encodeURIComponent(srcEl.value.trim());
-
-    prevBtn.onclick = () => {
-      if (!srcEl.value.trim()) { toast("Paste the folder link first."); return; }
-      prevBtn.disabled = true; runBtn.disabled = true;
-      busy("Reading that folder and working out where each document belongs…");
-      fetch(qs("preview")).then(r => r.json()).then(d => {
-        prevBtn.disabled = false;
-        if (d.error) { err(d.error); return; }
-        const f = (d.facilities || [])[0] || {};
-        if (f.error) { err(f.error); return; }
-        runBtn.disabled = !f.toCopy;
-        out.innerHTML =
-          '<div style="padding:10px 12px;border-radius:8px;background:var(--bg,#f1f5f9);font-size:12.5px;margin-bottom:9px">' +
-          '<b>' + f.found + '</b> documents in “' + esc(f.source || "") + '” · <b>' + f.toCopy + '</b> new to copy · ' +
-          f.alreadyThere + ' already here' +
-          (f.archiveFoldersSkipped && f.archiveFoldersSkipped.length ? '<br><span class="pf-dim">Skipped ' + f.archiveFoldersSkipped.length + ' archive folder(s): ' + esc(f.archiveFoldersSkipped.join(", ")) + '</span>' : "") +
-          '</div>' +
-          (f.sections || []).map(sec =>
-            '<div style="margin-bottom:7px"><div style="font-size:12px;font-weight:700">' + esc(sec.section) + ' <span class="pf-dim">(' + sec.count + ')</span></div>' +
-            '<div style="font-size:11.5px;line-height:1.7;padding-left:10px">' + sec.files.map(n => '· ' + esc(n)).join("<br>") +
-            (sec.count > sec.files.length ? '<br><span class="pf-dim">…and ' + (sec.count - sec.files.length) + ' more</span>' : "") + '</div></div>').join("") +
-          (f.datedInThePast && f.datedInThePast.length
-            ? '<div style="margin-top:10px;padding:9px 11px;border-radius:8px;background:#fffbeb;color:#92400e;font-size:12px">' +
-              '<b>Check these ' + f.datedInThePast.length + ' filename date(s).</b> Your convention puts the <b>expiry</b> in the filename, ' +
-              'but these are dated in the past — so either they really have expired, or they were named with the date printed on the ' +
-              'certificate instead of the date it runs out.<br><span style="font-size:11.5px;line-height:1.7">' +
-              f.datedInThePast.map(x => '· ' + esc(x.name)).join("<br>") + '</span></div>' : "") +
-          '<div class="item-sub" style="margin-top:9px">' + esc(f.note || "") + '</div>';
-      }).catch(e => { prevBtn.disabled = false; err(String(e.message || e)); });
-    };
-
-    runBtn.onclick = () => {
-      if (!confirm("Copy the new documents into " + facility + "'s Sentinel folders?\n\nThe working folder is not touched — this only makes copies.")) return;
-      prevBtn.disabled = true; runBtn.disabled = true;
-      busy("Copying…");
-      const go = () => fetch(qs("run"), { method: "POST" }).then(r => r.json()).then(d => {
-        prevBtn.disabled = false; runBtn.disabled = false;
-        if (d.error) { err(d.error); return; }
-        const f = (d.facilities || [])[0] || {};
-        out.innerHTML =
-          '<div style="padding:10px 12px;border-radius:8px;font-size:12.5px;background:' + (f.failed ? "#fef2f2" : "#ecfdf5") + ';color:' + (f.failed ? "#991b1b" : "#065f46") + '">' +
-          '<b>' + f.copying + ' file' + (f.copying === 1 ? "" : "s") + ' copying</b>' + (f.failed ? ' · ' + f.failed + ' failed' : "") +
-          (f.remaining ? ' · ' + f.remaining + ' still to go' : "") + '</div>' +
-          ((f.errors || []).length ? '<div style="margin-top:8px;font-size:11.5px;line-height:1.7">' + f.errors.map(x => '· ' + esc(x.name) + ' — ' + esc(x.error)).join("") + '</div>' : "") +
-          '<div class="item-sub" style="margin-top:9px">' + esc(f.note || "") + '</div>' +
-          (f.remaining ? '<button class="btn-primary" id="fsMore" style="width:100%;margin-top:10px">Copy the remaining ' + f.remaining + '</button>' : "");
-        const more = out.querySelector("#fsMore"); if (more) more.onclick = () => { busy("Copying…"); go(); };
-        if (f.copying) toast("✓ " + f.copying + " file(s) copying into " + facility + ".");
-      }).catch(e => { prevBtn.disabled = false; runBtn.disabled = false; err(String(e.message || e)); });
-      // Remember the link first, so the nightly job can repeat this without anyone re-pasting.
-      if (autoEl.checked) {
-        fetch("/api/data?facsync=save", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ facility: facility, src: srcEl.value.trim() }) }).then(go).catch(go);
-      } else go();
-    };
-
-    reorgBtn.onclick = () => {
-      busy("Checking where each document is filed…");
-      fetch("/api/data?facsync=reorg&facility=" + encodeURIComponent(facility)).then(r => r.json()).then(d => {
-        if (d.error) { err(d.error); return; }
-        if (!d.misfiled) { out.innerHTML = '<div class="item-sub">Everything is filed in the right section. 🎉</div>'; return; }
-        out.innerHTML =
-          '<div style="padding:10px 12px;border-radius:8px;background:#fffbeb;color:#92400e;font-size:12.5px;margin-bottom:9px">' +
-          '<b>' + d.misfiled + ' document' + (d.misfiled === 1 ? "" : "s") + ' filed in the wrong section.</b></div>' +
-          (d.groups || []).map(g => '<div style="margin-bottom:7px"><div style="font-size:12px;font-weight:700">' + esc(g.move) + ' <span class="pf-dim">(' + g.count + ')</span></div>' +
-            '<div style="font-size:11.5px;line-height:1.7;padding-left:10px">' + g.sample.map(n => '· ' + esc(n)).join("<br>") +
-            (g.count > g.sample.length ? '<br><span class="pf-dim">…and ' + (g.count - g.sample.length) + ' more</span>' : "") + '</div></div>').join("") +
-          '<div class="item-sub" style="margin-top:8px">' + esc(d.note || "") + '</div>' +
-          '<button class="btn-primary" id="fsMove" style="width:100%;margin-top:10px;background:#b45309">Move them into the right sections</button>';
-        out.querySelector("#fsMove").onclick = () => {
-          if (!confirm("Move " + d.misfiled + " document(s) into the correct section?\n\nThis moves files inside Sentinel's own folders only. The working folder is not touched.")) return;
-          busy("Moving…");
-          fetch("/api/data?facsync=reorg-run", { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ facility: facility }) }).then(r => r.json()).then(x => {
-            if (x.error) { err(x.error); return; }
-            out.innerHTML = '<div style="padding:10px 12px;border-radius:8px;font-size:12.5px;background:' + (x.failed ? "#fef2f2" : "#ecfdf5") + ';color:' + (x.failed ? "#991b1b" : "#065f46") + '">' +
-              '<b>' + x.moved + ' moved</b>' + (x.failed ? ' · ' + x.failed + ' failed' : "") + (x.remaining ? ' · ' + x.remaining + ' left — run again' : "") + '</div>' +
-              '<div class="item-sub" style="margin-top:9px">' + esc(x.note || "") + '</div>';
-            if (x.moved) toast("✓ " + x.moved + " document(s) refiled.");
-          }).catch(e => err(String(e.message || e)));
-        };
-      }).catch(e => err(String(e.message || e)));
-    };
-  }
-
   // ---- Onboarding status board (per new-hire process checklist, saved to OneDrive) ----
   var ONBOARD_STEPS = [
     ["welcome", "Welcome letter sent"],
@@ -2163,12 +2042,9 @@
       fmf.innerHTML = '<div class="add-plus">📁</div><div class="tile-nm">Add / manage folders</div><div class="tile-meta">Create or delete folders in OneDrive</div>';
       fmf.onclick = () => openFacilityFolders(fent);
       grid.insertBefore(fmf, grid.firstChild);
-      if (tab === "facility") {
-        const fsy = el("div", "tile tile-add");
-        fsy.innerHTML = '<div class="add-plus">🔄</div><div class="tile-nm">Sync documents</div><div class="tile-meta">Pull the latest files in from the working folder</div>';
-        fsy.onclick = () => openFacilitySync(fent);
-        grid.insertBefore(fsy, grid.firstChild);
-      }
+      // No "Sync documents" tile. Document syncing is automatic — the master folder is pulled
+      // in and filed every 15 minutes by tools/sync-master.js, so a button asking someone to
+      // trigger it by hand is a chore the system should not be handing back to the user.
     }
     c.appendChild(grid);
 
