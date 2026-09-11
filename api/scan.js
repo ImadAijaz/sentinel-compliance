@@ -114,42 +114,7 @@ function deriveEntity(folderRel) {
 }
 const OCR_KEY = process.env.OCR_SPACE_KEY || "helloworld";
 
-const FILE_RULES = {
-  "ACLS Certification": "\\bacls\\b", "ATLS Certification": "\\batls\\b", "PALS Certification": "\\bpals\\b",
-  "BLS Certification": "\\bbls\\b", "State Medical License": "tmb[ ]*cert|medical license|tmb certificate|tmb[ ]+\\d",
-  "Medical License Verify (annual)": "tmb[ ]*ver|tmb veri",
-  // "^dea " must NOT swallow "DEA Verification ..." — that catch-all was matching the annual
-  // verification letters and filing them (and their dates) under the registration itself, which
-  // both mislabels the document and writes the wrong expiry into the master Excel.
-  "Individual DEA Registration": "dea[ ]*cert|dea certificate|dea[ ]*reg|^dea (?!ver)",
-  "DEA Verify (annual)": "dea[ ]*ver", "Influenza Vaccination": "flu|influenza",
-  "TB Screening": "\\btb\\b|ppd|tubercul|quantiferon|\\bcxr\\b|chest", "Driver's License": "txdl|driver|drivers? lic|\\bdl\\b",
-  "NPDB Query (2 yrs)": "npdb", "OIG / SAM Exclusion Check": "oig|sam |exclusion", "NPI Verification": "nppes|\\bnpi\\b",
-  "TSCA Documents": "tsca", "CME (20 hrs / 2 yrs)": "\\bcme\\b", "Delineation of Privileges (DOP)": "privilege|\\bdop\\b",
-  "Peer References": "reference|peer", "Initial Application": "application|initial app",
-  "CV / Resume": "\\bcv\\b|resume|curriculum", "Medical Diploma": "diploma|medical school|ecfmg",
-  "Malpractice / COI Insurance": "malpractice|certificate of insurance|\\bcoi\\b|tail coverage|policy",
-  // Board cert files are commonly named ONLY by the board acronym (e.g. "ABEM_2027.pdf"),
-  // so we accept the common boards in addition to literal "board"/"recert".
-  "Board Certification": "board|recert|\\b(abem|abfm|abim|abps|aobem|aobim|aboem|abog|abpn|abs|abucm|aagp|abo|abr)\\b",
-  // Facility credentials. Without these, matchItem() had no rule for ANY facility category, so
-  // every facility document fell through to the generic supplemental path and its filename date
-  // became an expiry. Now a renewed CLIA/COLA/licence attaches to the credential it is evidence
-  // for, and its date refreshes that credential instead of creating a second card beside it.
-  ...FAC.FACILITY_FILE_RULES,
-};
-// Normalize a filename for rule matching. Underscores were handled but hyphens and dots were
-// not, so "DEA-Cert-2027.pdf" and "Medical.License.2027.pdf" matched nothing while the
-// underscore spellings matched — the same document filed two ways behaved differently.
-// The old blanket /ii/->/i/ also mangled real words ("Hawaii" -> "Hawai"), so it is now limited
-// to the one thing it was for: the roster's recurring "Verifiy" misspelling.
-function normf(s) {
-  return String(s).toLowerCase()
-    .replace(/[_\-.]+/g, " ")   // hyphens and dots too, not just underscores
-    .replace(/ii/g, "i")        // kept as-is: existing rules were tuned against this behavior
-    .replace(/\s+/g, " ")
-    .trim();
-}
+const { FILE_RULES, normf } = require("../lib/filerules");
 function extractDates(text) {
   const out = []; let m;
   const push = (y, mo, d) => { if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) out.push(y + "-" + String(mo).padStart(2, "0") + "-" + String(d).padStart(2, "0")); };
