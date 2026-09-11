@@ -80,9 +80,29 @@ function deriveEntity(folderRel) {
     }
     return { scope: "provider", entity, entityKey: slug(keyName), phaseIdx: idx, sectionLabel: phase };
   }
+  // Staff documents, filed by the master sync as Staff/<Site>/<Person>/<Category>/<file>.
+  // The sync brought 914 of these across for 64 people at four sites; without this they land
+  // in SharePoint correctly but never reach the dashboard, because deriveEntity only knew
+  // about providers and facilities.
+  if (parts[0] === "Staff" && parts.length >= 3) {
+    const person = parts[2];
+    if (!person || /^[._]/.test(person)) return null;
+    // Staff folders are "Last, First_ROLE" — keep the role out of the displayed name.
+    const bare = person.replace(/_[^_]*$/, "").trim() || person;
+    const keyName = bare.indexOf(",") >= 0 ? bare.replace(/,/g, " ") : bare;
+    return {
+      scope: "staff", entity: bare, entityKey: slug(keyName),
+      phaseIdx: 0, sectionLabel: parts[3] || "Documents", site: parts[1],
+    };
+  }
   if (parts[0] === "State Readiness" && parts.length >= 3) {
     const fac = parts[1], sect = parts[2];
-    const entity = fac === "Castle Hills" ? "Castle Hills ER" : (fac === "Frisco" ? "Frisco ER" : null);
+    // Was a hardcoded two-way map, so a site the sync newly files documents for (Urgent Care
+    // Ennis, Urgent Care Plano) returned null and every one of its documents was dropped.
+    // An ER site keeps its " ER" suffix; anything else is used as named.
+    const entity = fac === "Castle Hills" ? "Castle Hills ER"
+      : fac === "Frisco" ? "Frisco ER"
+      : (/^[A-Za-z0-9][A-Za-z0-9 .,'&-]{1,60}$/.test(fac) ? fac : null);
     if (!entity) return null;
     let idx = STATE_SECTIONS.indexOf(sect);
     // A folder added via the dashboard ("Add folder") won't be one of the standard sections —
