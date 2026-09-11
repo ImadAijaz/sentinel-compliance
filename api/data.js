@@ -880,7 +880,10 @@ module.exports = async (req, res) => {
       const { accessToken, docsRoot, encPath, ensureFolderIn, readJsonAt, writeJsonAt, drivePath } = require("../lib/graph");
       const token = await accessToken();
       const TRASH = drivePath("_Sentinel/facility_trash.json");
-      const FAC_DIR = { "Castle Hills ER": "Castle Hills", "Frisco ER": "Frisco" };
+      const FAC_DIR = {
+        "Castle Hills ER": "Castle Hills", "Frisco ER": "Frisco",
+        "Urgent Care Ennis": "Urgent Care Ennis", "Urgent Care Plano": "Urgent Care Plano",
+      };
       const baseFor = (fac) => "Sama Farooqui/Sentinel/State Readiness/" + FAC_DIR[fac];
       const cleanName = (n) => String(n || "").replace(/[\/\\:*?"<>|]/g, "").replace(/\s+/g, " ").trim();
 
@@ -892,7 +895,7 @@ module.exports = async (req, res) => {
       let body = ""; await new Promise(r => { req.on("data", c => body += c); req.on("end", r); });
       let b = {}; try { b = JSON.parse(body || "{}"); } catch (e) {}
       const fac = String(b.facility || "").trim();
-      if (!FAC_DIR[fac]) { res.status(400).json({ error: "facility must be 'Castle Hills ER' or 'Frisco ER'", got: fac }); return; }
+      if (!FAC_DIR[fac]) { res.status(400).json({ error: "unknown facility", got: fac }); return; }
 
       if (facilityAction === "list") {
         const r = await fetch(docsRoot() + "/root:/" + encPath(baseFor(fac)) + ":/children?$select=name,folder&$top=400", { headers: { Authorization: "Bearer " + token } });
@@ -1024,18 +1027,34 @@ module.exports = async (req, res) => {
   }
 
   res.setHeader("Cache-Control", "no-store");
-  const tabs = (s.tabs && s.tabs.length) ? s.tabs : ["provider", "facility", "other"];
+  const tabs = (s.tabs && s.tabs.length) ? s.tabs : ["provider", "staff", "facility", "other"];
   let items = (data.items || []).filter(i => tabs.includes(i.scope));
   let deltaSuppressed = null;
   // Merge the live roster delta — surfaces Excel-roster changes without a code redeploy.
   // Placeholders carry a SharePoint folderLink so the QR/upload flow works immediately.
-  if (tabs.includes("provider")) {
+  if (tabs.includes("provider") || tabs.includes("staff")) {
     const { applyRosterDelta } = require("../lib/delta");
     items = await applyRosterDelta(items);
     // Carry the "we ignored the live roster cache" warning through to the client, so a stale
     // board announces itself instead of quietly looking normal.
     deltaSuppressed = items.deltaSuppressed || null;
   }
+  // Older baked staff rows pointed at the facility's State Readiness root, so an upload for
+  // Neelam Bhandari could not be attributed to Neelam at all.  Normalize every staff row to the
+  // same Staff/<Site>/<Last, First_ROLE> tree produced by the master sync.
+  items = items.map(i => {
+    if (i.scope !== "staff") return i;
+    const site = i.staffFacility || i.facility || "Unassigned";
+    const siteDir = site === "Castle Hills ER" ? "Castle Hills" : site === "Frisco ER" ? "Frisco" : site;
+    const toks = String(i.entity || "").trim().split(/\s+/).filter(Boolean);
+    const last = toks.length ? toks[toks.length - 1] : "Staff";
+    const first = toks.slice(0, -1).join(" ");
+    const folderRole = /front desk/i.test(i.role || "") ? "FD" : (i.role || "Staff");
+    const person = last + (first ? ", " + first : "") + "_" + folderRole;
+    const enc = s => encodeURIComponent(String(s));
+    const folder = "https://wcgtx.sharepoint.com/sites/CorporateArchivesDirectory/Shared%20Documents/Sama%20Farooqui/Sentinel/Staff/" + enc(siteDir) + "/" + enc(person);
+    return Object.assign({}, i, { folderLink: folder, fileLink: i.isFile ? i.fileLink : folder });
+  });
   // Apply the dates read off the documents themselves. tools/refresh-data.js runs on the
   // credentialing PC every 15 minutes, reads the expiry out of each document's filename and
   // publishes the result to _Sentinel/doc_dates.json. Without this a renewed certificate only
@@ -1047,11 +1066,35 @@ module.exports = async (req, res) => {
   // able to drag a current credential backwards into looking expired.
   try {
     const G = require("../lib/graph");
-    const dd = await G.readJsonAt(await G.accessToken(), G.drivePath("_Sentinel/doc_dates.json"));
+    const token = await G.accessToken();
+    // The generated date cache now lives with the documents in the corporate team library.
+    // Fall back to the old personal-OneDrive state file during the migration window.
+    const dd = (await G.readDocsJsonAt(token, "Sama Farooqui/Sentinel/_State/doc_dates.json")) ||
+      (await G.readJsonAt(token, G.drivePath("_Sentinel/doc_dates.json")));
     if (dd && dd.dates) {
       items = items.map(i => {
         const d = dd.dates[i.id];
-        if (!d || !d.expires) return i;
+        if (!d) return i;
+        // Recurring obligations carry two dates: when the inspection/meeting happened and the
+        // next due date derived from its configured cadence.  Evidence-only operational rows
+        // still get their latest document/date even when no cadence is asserted.
+        if (i.scope === "other" && d.recurring) {
+          const patch = {
+            isFile: true, fileLink: d.link || i.fileLink,
+            recordDate: d.recordDate || i.recordDate || null,
+            recurringFromDocument: true,
+            cadenceMonths: d.cadenceMonths || i.cadenceMonths || null,
+          };
+          if (d.expires && (!i.expires || d.expires > i.expires)) {
+            patch.expires = d.expires; patch.permanent = false; patch.pending = false;
+          }
+          const effectiveDue = patch.expires || i.expires || null;
+          patch.notes = "Latest evidence: " + (patch.recordDate || "date not found") +
+            (effectiveDue ? "; next due: " + effectiveDue : "; cadence not configured") +
+            (d.cadenceNote ? ". " + d.cadenceNote + "." : "");
+          return Object.assign({}, i, patch);
+        }
+        if (!d.expires) return i;
         if (i.expires && d.expires <= i.expires) return i;
         return Object.assign({}, i, {
           expires: d.expires, isFile: true, fileLink: d.link || i.fileLink,
@@ -1104,5 +1147,6 @@ module.exports = async (req, res) => {
   const entityFiles = {};
   for (const k in (data.entityFiles || {})) if (keys.has(k)) entityFiles[k] = data.entityFiles[k];
   const contacts = tabs.includes("facility") ? (data.contacts || []) : [];
-  res.status(200).json(Object.assign({}, data, { items, entityFiles, contacts, allowedTabs: tabs, deltaSuppressed }));
+  const facilities = Array.from(new Set([...(data.facilities || []), "Urgent Care Ennis", "Urgent Care Plano"]));
+  res.status(200).json(Object.assign({}, data, { items, entityFiles, contacts, facilities, allowedTabs: tabs, deltaSuppressed }));
 };
