@@ -1,9 +1,8 @@
 // Auto-detect documents added ANYWHERE under the Sentinel library — via the dashboard QR
 // uploader, OneDrive, or directly in SharePoint. Graph "delta" finds new/changed files and
-// matches them to items. For matched files with no date in the filename, it then reads the
-// expiry by OCR (OCR.space, free) SERVER-SIDE — so dates fill in automatically, no opening.
+// matches them to items. Expiry dates are read only from filenames by the shared date parser.
 // Results -> _Sentinel/auto_detected.json, which /api/uploads-map merges into the dashboard.
-const { accessToken, docsRoot, docsPathFromUrl, encPath, drivePath, readJsonAt, writeJsonAt, dateFromName } = require("../lib/graph");
+const { accessToken, docsRoot, docsPathFromUrl, drivePath, readJsonAt, writeJsonAt, dateFromName } = require("../lib/graph");
 const { applyRosterDelta } = require("../lib/delta");
 const FAC = require("../lib/facility");
 // Re-read data.json fresh on each invocation (don't cache via require — warm lambdas would
@@ -112,44 +111,20 @@ function deriveEntity(folderRel) {
   }
   return null;
 }
-const OCR_KEY = process.env.OCR_SPACE_KEY || "helloworld";
-
 const { FILE_RULES, normf } = require("../lib/filerules");
-function extractDates(text) {
-  const out = []; let m;
-  const push = (y, mo, d) => { if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) out.push(y + "-" + String(mo).padStart(2, "0") + "-" + String(d).padStart(2, "0")); };
-  const re = /\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/g;
-  while ((m = re.exec(text))) { let y = +m[3]; if (y < 100) y += 2000; push(y, +m[1], +m[2]); }
-  const mon = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
-  const re2 = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\b/gi;
-  while ((m = re2.exec(text))) push(+m[3], mon[m[1].toLowerCase().slice(0, 3)], +m[2]);
-  return [...new Set(out)].sort();
-}
-function pickExpiry(dates) {
-  if (!dates || !dates.length) return null;
-  const today = new Date().toISOString().slice(0, 10);
-  const fut = dates.filter(d => d >= today);
-  return fut.length ? fut[fut.length - 1] : dates[dates.length - 1];
-}
-// OCR a document by its library path. Returns [dates] (possibly empty) or null on error/throttle.
-async function ocrDates(token, folderPath, name) {
-  try {
-    const url = docsRoot() + "/root:/" + encPath(folderPath + "/" + name) + ":/content";
-    const fr = await fetch(url, { headers: { Authorization: "Bearer " + token } });
-    if (!fr.ok) return null;
-    const ab = await fr.arrayBuffer();
-    const fd = new FormData();
-    fd.append("apikey", OCR_KEY); fd.append("OCREngine", "2"); fd.append("scale", "true");
-    if (/\.pdf$/i.test(name || "")) fd.append("filetype", "PDF");
-    fd.append("file", new Blob([ab]), name || "doc");
-    const o = await fetch("https://api.ocr.space/parse/image", { method: "POST", body: fd });
-    const oj = await o.json().catch(() => ({}));
-    if (oj.IsErroredOnProcessing) return null;
-    return extractDates((oj.ParsedResults || []).map(p => p.ParsedText || "").join("\n"));
-  } catch (e) { return null; }
-}
-
 let INDEX = null;
+function itemFolderRel(it) {
+  if (it && it.scope === "staff") {
+    const site = it.staffFacility || it.facility || "Unassigned";
+    const siteDir = site === "Castle Hills ER" ? "Castle Hills" : site === "Frisco ER" ? "Frisco" : site;
+    const toks = String(it.entity || "").trim().split(/\s+/).filter(Boolean);
+    const last = toks.length ? toks[toks.length - 1] : "Staff";
+    const first = toks.slice(0, -1).join(" ");
+    const role = /front desk/i.test(it.role || "") ? "FD" : (it.role || "Staff");
+    return "Sama Farooqui/Sentinel/Staff/" + siteDir + "/" + last + (first ? ", " + first : "") + "_" + role;
+  }
+  return docsPathFromUrl((it && (it.folderLink || it.fileLink)) || "");
+}
 // Build the folder->items index from the LIVE item set (baked data.json + the roster delta).
 // It used to read the baked data only, so a provider added through "+ Add provider" was absent
 // from the index: every document later dropped into their brand-new folder matched nothing and
@@ -162,7 +137,7 @@ async function indexAsync() {
   try { items = await applyRosterDelta(base); } catch (e) { items = base; }
   const folders = {};
   for (const it of items) {
-    const rel = docsPathFromUrl(it.folderLink || it.fileLink || "");
+    const rel = itemFolderRel(it);
     if (!rel) continue;
     (folders[rel] = folders[rel] || []).push(it);
   }
@@ -174,7 +149,7 @@ function index() {
   if (INDEX) return INDEX;
   const folders = {};
   for (const it of (getData().items || [])) {
-    const rel = docsPathFromUrl(it.folderLink || it.fileLink || "");
+    const rel = itemFolderRel(it);
     if (!rel) continue;
     (folders[rel] = folders[rel] || []).push(it);
   }
@@ -185,9 +160,17 @@ function matchItem(folderRel, fileName) {
   const { folders, rels } = index();
   const rel = rels.find(r => folderRel === r || folderRel.startsWith(r + "/"));
   if (!rel) return null;
-  const nf = normf(fileName);
-  for (const it of folders[rel]) { const rule = FILE_RULES[it.category]; if (rule && new RegExp(rule, "i").test(nf)) return it; }
+  for (const it of folders[rel]) {
+    if (it.scope === "other") continue; // recurring rows need multi-match + cadence handling below
+    const rule = FILE_RULES[it.category]; if (rule && new RegExp(rule, "i").test(normf(folderRel + "/" + fileName))) return it;
+  }
   return null;
+}
+function matchRecurringItems(folderRel, fileName) {
+  const { folders, rels } = index();
+  const rel = rels.find(r => folderRel === r || folderRel.startsWith(r + "/"));
+  if (!rel) return [];
+  return FAC.matchRecurringObligations(folders[rel], folderRel + "/" + fileName, fileName);
 }
 function relFromParent(path) {
   const i = String(path || "").indexOf("root:");
@@ -235,7 +218,7 @@ module.exports = async (req, res) => {
     const folderErrors = [];   // surface folder-watch failures (e.g. trash write) instead of swallowing
     const dateUpdates = [];     // {entityKey,category,date} to auto-fill into the Credentials sheet (empty cells only)
     const start = Date.now();
-    while (next && pages < 8 && Date.now() - start < 4000) {   // keep delta short, leave time for one OCR
+    while (next && pages < 8 && Date.now() - start < 4000) {   // keep the delta crawl inside the function budget
       const r = await fetch(next, { headers: { Authorization: "Bearer " + token } });
       if (!r.ok) {
         const body = await r.text().catch(() => "");
@@ -259,79 +242,16 @@ module.exports = async (req, res) => {
         // Only the Sentinel tree, case-insensitive + boundary-anchored, and skip archive subpaths.
         if (!folderRel || !/(^|\/)Sentinel(\/|$)/i.test(folderRel)) continue;
         if (isArchivedPath(folderRel)) continue;
-        // Folder events: a new/deleted Provider/<Name>/ folder updates the master Excel roster.
-        // The folder appears as a Graph item with .folder set, parented at the Provider directory.
+        // A SharePoint folder is document storage, not roster authority. Ignore provider-folder
+        // events here: additions and removals must come from the master Excel roster. In
+        // particular, deleting or archiving a folder must never hard-delete a provider row.
         if (v.folder && /(^|\/)Sentinel\/Provider$/i.test(folderRel)) {
-          const name = String(v.name || "").trim();
-          // Skip system / test / placeholder names so a stray folder doesn't pollute the roster.
-          // Also skip "zz."-prefixed folders — that's the archive convention used throughout this
-          // OneDrive (and the one the facility soft-delete writes). Without it, archiving a
-          // provider by renaming their folder to "zz.Smith John" made the watcher append a
-          // phantom roster row (last="John", first="zz.Smith") to the master Excel.
-          if (!name || /^[._]/.test(name) || /^zz\./i.test(name) || /^(test|temp|new folder|untitled)/i.test(name)) continue;
-          try {
-            const xl = require("../lib/excel");
-            // Folders are named either "First Last" or, following the roster's own convention,
-            // "Last, First". A comma is an explicit separator — splitting on whitespace instead
-            // produced last="Jose", first="Crespo," for a folder called "Crespo, Jose".
-            let last, first, parts;
-            if (name.indexOf(",") >= 0) {
-              const seg = name.split(",");
-              last = seg[0].trim();
-              first = seg.slice(1).join(",").trim();
-              parts = [last, first].filter(Boolean);     // comma form is unambiguous
-            } else {
-              parts = name.split(/\s+/);
-              last = parts[parts.length - 1] || name;
-              first = parts.slice(0, -1).join(" ") || "";
-            }
-            if (v.deleted) {
-              // Folder removed from SharePoint -> HARD delete the roster row(s) and log to
-              // Recycle bin so the dashboard reflects it immediately (no "Inactive" middle step).
-              await xl.snapshotWorkbook(token, "scan-folder-deleted");
-              const slugFn = (l, f) => (l + "-" + (f || "")).replace(/[\*,()]+/g, "").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
-              const ekey = slugFn(last, first);
-              const removed = await xl.hardDelete(token, ekey, last, first);
-              if (removed.length) {
-                const trashPath = drivePath("_Sentinel/trash.json");
-                const trash = (await readJsonAt(token, trashPath)) || { entries: [] };
-                if (ekey) trash.entries = (trash.entries || []).filter(e => e.entityKey !== ekey);
-                trash.entries.unshift({
-                  id: "tr_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8),
-                  entityKey: ekey, entity: name,
-                  deletedAt: new Date().toISOString(),
-                  deletedBy: "scan/folder-watcher",
-                  rows: removed,
-                });
-                if (trash.entries.length > 200) trash.entries = trash.entries.slice(0, 200);
-                await writeJsonAt(token, trashPath, trash);
-              }
-            } else {
-              // Match on the FULL folder name — no surname guessing. "Maria De La Cruz" split as
-              // last="Cruz"/first="Maria De La" matched nothing and appended a duplicate row for
-              // a provider who was already on the roster.
-              const dup = (await xl.findRowByFullName(token, name)) || (parts.length === 2 ? await xl.findAnywhere(token, last, first) : null);
-              if (!dup) {
-                // Only append when the split is UNAMBIGUOUS (exactly "First Last"). With more
-                // tokens we cannot tell where the surname begins, and this runs unattended
-                // against the master roster — guessing wrong writes a bad row into the source of
-                // truth. Surface it for a human to add properly instead.
-                if (parts.length === 2) {
-                  await xl.snapshotWorkbook(token, "scan-folder-added");
-                  // appendProviderRow — NOT appendRow. appendRow writes positionally at columns
-                  // 1-2, which on a roster with a leading tracking column puts the surname in
-                  // that column and leaves First Name blank.
-                  await xl.appendProviderRow(token, xl.SHEET_ACTIVE, last, first);
-                } else {
-                  folderErrors.push({ name, error: "not added automatically: cannot tell which part of \"" + name + "\" is the surname. Add this provider with '+ Add provider' so the name lands in the right columns." });
-                }
-              }
-            }
-          } catch (e) { folderErrors.push({ name, error: String(e.message || e).slice(0, 200) }); }
           continue;
         }
         if (!v.file && !v.deleted) continue;
         const it = matchItem(folderRel, v.name || "");
+        const recurring = matchRecurringItems(folderRel, v.name || "");
+        let matchedTracked = false;
         if (it) {
           if (v.deleted) { if (detected[it.id] && detected[it.id].name === v.name) { delete detected[it.id]; changed++; } }
           else {
@@ -341,8 +261,29 @@ module.exports = async (req, res) => {
             // a fresh expiry from the filename → queue an Excel auto-fill (empty cells only)
             if (nameDate && it.entityKey && it.category) dateUpdates.push({ entityKey: it.entityKey, category: it.category, date: nameDate });
           }
-          continue;
+          matchedTracked = true;
         }
+        for (const rec of recurring) {
+          const rit = rec.item;
+          if (v.deleted) {
+            if (detected[rit.id] && detected[rit.id].name === v.name) { delete detected[rit.id]; changed++; }
+          } else if (rec.recordDate) {
+            const prev = detected[rit.id] || {};
+            // Delta events can arrive out of order during a full crawl.  Keep the newest event
+            // evidence so an older inspection can never pull a recurring due date backwards.
+            if (!prev.recordDate || rec.recordDate >= prev.recordDate) {
+              detected[rit.id] = {
+                url: v.webUrl || "", name: v.name,
+                date: rec.nextDue || null, recordDate: rec.recordDate,
+                recurring: true, cadenceMonths: rec.cadenceMonths || null,
+                cadenceNote: rec.note || null,
+              };
+              changed++;
+            }
+          }
+          matchedTracked = true;
+        }
+        if (matchedTracked) continue;
         // No tracked item matched this file — surface it as a supplemental record so the
         // dashboard still shows it (within the 45-second live-sync, no regen required).
         const ent = deriveEntity(folderRel);
@@ -395,7 +336,7 @@ module.exports = async (req, res) => {
       }
       next = j["@odata.nextLink"]; deltaLink = j["@odata.deltaLink"] || deltaLink; pages++;
     }
-    // Save delta progress BEFORE the (slower) OCR step so nothing is lost on timeout.
+    // Save delta progress before any workbook update so nothing is lost on timeout.
     if (changed) await writeJsonAt(token, DETECTED, detected);
     if (suppChanged) await writeJsonAt(token, SUPP, supplemental);
     // Never write back a link we know is dead. `deltaLink` is the fresh cursor from a completed
@@ -403,25 +344,6 @@ module.exports = async (req, res) => {
     // neither AND the previous one didn't just fail.
     const nextCursor = deltaLink || next || (fetchError ? (docsRoot() + "/root/delta") : state.deltaLink);
     await writeJsonAt(token, STATE, { deltaLink: nextCursor, driveTag: "docs-v1" });
-
-    // Background OCR: read the expiry for ONE not-yet-read document (keeps each run < 10s).
-    let ocrChanged = false, ocred = null;
-    const byId = {}; for (const it of (getData().items || [])) byId[it.id] = it;
-    for (const id in detected) {
-      if (Date.now() - start > 5500) break;
-      const d = detected[id];
-      if (d.date || d.ocrTried) continue;             // already has a date, or already OCR'd with no luck
-      const it = byId[id]; if (!it) continue;
-      const folderPath = docsPathFromUrl(it.folderLink || it.fileLink || ""); if (!folderPath) continue;
-      const dates = await ocrDates(token, folderPath, d.name);
-      if (dates === null) continue;                   // transient (throttle/error) — retry next run
-      if (dates.length) {
-        d.date = pickExpiry(dates); d.ocr = true;
-        if (it.entityKey && it.category) dateUpdates.push({ entityKey: it.entityKey, category: it.category, date: d.date });
-      } else { d.ocrTried = true; }
-      ocrChanged = true; ocred = { id, date: d.date || null }; break;   // one per run
-    }
-    if (ocrChanged) await writeJsonAt(token, DETECTED, detected);
 
     // Auto-fill detected expiry dates into empty cells of the Credentials sheet.
     let excelFill = null;
@@ -434,7 +356,7 @@ module.exports = async (req, res) => {
     // Report the crawl state, so a stalled or recovering scan is visible instead of silent.
     res.status(200).json({
       ok: true, changed, suppChanged, items: Object.keys(detected).length,
-      suppItems: Object.keys(supplemental).length, ocr: ocred, folderErrors, excelFill,
+      suppItems: Object.keys(supplemental).length, folderErrors, excelFill,
       pages, resynced, moreToScan: !!next && !deltaLink, error: fetchError || undefined,
     });
   } catch (e) {
