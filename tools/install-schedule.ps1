@@ -7,7 +7,8 @@
 # Vercel's free plan allows one cron run a DAY, so it cannot do this at all.
 #
 # Runs as the signed-in user (it needs that user's OneDrive folders), starts hidden, and skips
-# a run if the previous one is still going.
+# a run if the previous one is still going. -WakeToRun plus the battery settings keep it going
+# through sleep, and -StartWhenAvailable catches up a run the machine missed while off.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\install-schedule.ps1
 #   powershell -ExecutionPolicy Bypass -File tools\install-schedule.ps1 -Remove
@@ -46,7 +47,8 @@ $settings = New-ScheduledTaskSettingsSet `
   -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
   -StartWhenAvailable `
   -DontStopIfGoingOnBatteries `
-  -AllowStartIfOnBatteries
+  -AllowStartIfOnBatteries `
+  -WakeToRun
 
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
