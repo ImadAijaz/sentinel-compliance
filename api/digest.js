@@ -63,7 +63,7 @@ module.exports = async (req, res) => {
     if (req.method === "POST") {
       const s = getSession(req);
       if (!s) { res.status(401).json({ ok: false, message: "sign-in required" }); return; }
-      const allowed = (s.tabs && s.tabs.length) ? s.tabs : ["provider", "facility", "other"];
+      const allowed = (s.tabs && s.tabs.length) ? s.tabs : ["provider", "staff", "facility", "other"];
       let raw = ""; await new Promise(r => { req.on("data", c => raw += c); req.on("end", r); });
       let scopes = allowed;
       try { const b = JSON.parse(raw || "{}"); if (Array.isArray(b.scopes) && b.scopes.length) scopes = b.scopes.filter(x => allowed.includes(x)); } catch (e) {}
