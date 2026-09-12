@@ -6,6 +6,7 @@
 <p>An inventory must finish before copying starts. A completed copy is verified in SharePoint; a submitted copy is not counted as finished.</p>
 <button id="inspect">Check folder access</button><button id="start">Inventory all tracked folders</button><button id="resume">Resume saved work</button><button id="apply" disabled>Apply reviewed filing plan</button><button id="retry" disabled>Retry reported copies</button>
 <p id="status" role="status">Loading saved progress…</p><pre id="details"></pre>
+<h2>Find a source document</h2><label for="term">Filename or folder</label> <input id="term" placeholder="COLA or roster"><button id="audit">Check intake evidence</button><pre id="auditResult"></pre>
 <h2>Refresh dashboard documents</h2><p>After the copies finish, this checks every organized document and refreshes the cards. It does not copy files from the master.</p>
 <button id="scan">Rescan organized documents</button><p id="scanStatus" role="status"></p>
 <script>
@@ -17,5 +18,6 @@ async function work(action){if(running)return;running=true;for(const id of ['sta
 document.getElementById('inspect').onclick=async()=>{try{show(await call('inspect'));}catch(e){statusEl.textContent=e.message;}};
 document.getElementById('start').onclick=()=>work('start');document.getElementById('resume').onclick=()=>work('step');document.getElementById('apply').onclick=()=>work('apply');document.getElementById('retry').onclick=()=>work('retry');
 call('status').then(show).catch(e=>{statusEl.textContent=e.message;});
+document.getElementById('audit').onclick=async()=>{const out=document.getElementById('auditResult');out.textContent='Checking saved inventory…';try{const r=await fetch('/api/data?master=audit&term='+encodeURIComponent(document.getElementById('term').value)),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Could not read inventory');out.textContent=JSON.stringify(d,null,2);}catch(e){out.textContent=e.message;}};
 document.getElementById('scan').onclick=async()=>{const b=document.getElementById('scan'),m=document.getElementById('scanStatus');b.disabled=true;let pass=0,matched=0,added=0;try{let more=true;while(more){m.textContent='Scanning organized documents — pass '+(++pass);const r=await fetch('/api/scan'+(pass===1?'?rescan=1':''));const d=await r.json();if(!r.ok||d.ok===false||d.error)throw new Error(d.error||d.message||'Scan failed');matched+=d.changed||0;added+=d.suppChanged||0;more=d.moreToScan||d.busy;if(d.busy)await new Promise(r=>setTimeout(r,3000));}m.textContent='Complete: '+matched+' proof matches updated; '+added+' additional file records refreshed. The dashboard will load these automatically.';}catch(e){m.textContent='Scan incomplete: '+e.message;}finally{b.disabled=false;}};
 </script></main></body></html>

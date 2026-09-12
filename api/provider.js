@@ -13,6 +13,18 @@ const {
 
 const SUPP = drivePath("_Sentinel/supplemental_detected.json");
 const PORTAL_SECONDS = 60 * 60 * 24 * 7;
+let photoRecordsCache = null, photoRecordsPending = null;
+async function photoRecords() {
+  if (photoRecordsCache && photoRecordsCache.until > Date.now()) return photoRecordsCache.items;
+  if (!photoRecordsPending) photoRecordsPending = (async () => {
+    const token = await accessToken();
+    const live = Object.values((await readJsonAt(token, SUPP)) || {}).filter(photoLike);
+    const items = live.concat((data.items || []).filter(photoLike));
+    photoRecordsCache = { items, until: Date.now() + 60000 };
+    return items;
+  })();
+  try { return await photoRecordsPending; } finally { photoRecordsPending = null; }
+}
 
 function slim(i) {
   return {
@@ -114,6 +126,15 @@ module.exports = async (req, res) => {
   if (staff && !canUseProviders(staff)) { res.status(403).json({ error: "provider access required" }); return; }
 
   try {
+    // An avatar must not download and merge every provider's full evidence/roster data.
+    // A dashboard of 100 avatars otherwise generates hundreds of Microsoft requests.
+    if (u.searchParams.get("photo") === "1") {
+      const key = provider ? provider.entityKey : String(u.searchParams.get("e") || "").trim();
+      if (!key) { res.status(400).end(); return; }
+      const photo = (await photoRecords()).find(i => i.entityKey === key) || null;
+      await sendPhoto(res, photo);
+      return;
+    }
     const all = await providerItems();
     const requested = String(u.searchParams.get("e") || "").trim();
     const itemId = String(u.searchParams.get("item") || "").trim();

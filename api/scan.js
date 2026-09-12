@@ -88,11 +88,19 @@ function deriveEntity(folderRel) {
     const person = parts[2];
     if (!person || /^[._]/.test(person)) return null;
     // Staff folders are "Last, First_ROLE" — keep the role out of the displayed name.
-    const bare = person.replace(/_[^_]*$/, "").trim() || person;
+    const bare = person.split("_")[0].replace(/\b(FNP-?C|APRN|RN|NP|CMA|MA)\b/gi, "").trim() || person;
+    const n = bare.split(",").map(s => s.trim());
+    const display = n.length > 1 ? n.slice(1).join(" ") + " " + n[0] : bare;
     const keyName = bare.indexOf(",") >= 0 ? bare.replace(/,/g, " ") : bare;
+    const site = parts[1] === "Castle Hills" ? "Castle Hills ER" : parts[1] === "Frisco" ? "Frisco ER" : parts[1];
+    const normalize = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const existing = ((INDEX && INDEX.items) || []).filter(i => i.scope === "staff" &&
+      normalize(i.staffFacility || i.facility) === normalize(site) && normalize(i.entity) === normalize(display));
+    const keys = [...new Set(existing.map(i => i.entityKey))];
+    const canonical = keys.length === 1 ? existing[0] : null;
     return {
-      scope: "staff", entity: bare, entityKey: slug(keyName),
-      phaseIdx: 0, sectionLabel: parts[3] || "Documents", site: parts[1],
+      scope: "staff", entity: canonical ? canonical.entity : display, entityKey: canonical ? canonical.entityKey : slug(site, keyName),
+      phaseIdx: 0, sectionLabel: parts[3] || "Documents", site,
     };
   }
   if (parts[0] === "State Readiness" && parts.length >= 3) {
@@ -145,7 +153,7 @@ async function indexAsync() {
     if (!rel) continue;
     (folders[rel] = folders[rel] || []).push(it);
   }
-  INDEX = { folders, rels: Object.keys(folders).sort((a, b) => b.length - a.length) };
+  INDEX = { items, folders, rels: Object.keys(folders).sort((a, b) => b.length - a.length) };
   return INDEX;
 }
 function index() {
@@ -164,9 +172,10 @@ function matchItems(folderRel, fileName) {
   const { folders, rels } = index();
   const root = ownerRoot(folderRel);
   const rel = rels.find(r => root === r);
-  if (!rel) return [];
+  const ent = !rel && /\/Staff\//.test(folderRel) ? deriveEntity(folderRel) : null;
+  const candidates = rel ? folders[rel] : ent ? (index().items || []).filter(i => i.scope === "staff" && i.entityKey === ent.entityKey) : [];
   const found = [];
-  for (const it of folders[rel]) {
+  for (const it of candidates) {
     if (it.scope === "other" || it.supplemental) continue;
     const rule = FILE_RULES[it.category]; if (rule && new RegExp(rule, "i").test(normf(fileName))) found.push(it);
   }
@@ -346,13 +355,14 @@ module.exports = async (req, res) => {
         // Treating that as an expiry turned every set of meeting minutes red the day after the
         // meeting: 54 of the 62 dated facility documents on the board were records of this kind.
         // They keep their date — shown as a dated record — but no longer run an expiry clock.
-        const eventOnly = FAC.isNonExpiring(v.name || "");
+        const eventOnly = FAC.isNonExpiring(v.name || "") || /\b(photo|headshot|portrait)\b/i.test(normf(v.name || ""));
         const expFromName = eventOnly ? null : nameDate2;
         const rec = {
-          id: slug(ent.entityKey, "supp", (v.name || "").replace(/\.[^.]+$/, "")),
+          id: supplemental[key] ? supplemental[key].id : slug(ent.entityKey, "supp").slice(0, 55) + "-" + require("crypto").createHash("sha256").update(v.id || key).digest("hex").slice(0, 24),
           scope: ent.scope,
           entity: ent.entity,
           entityKey: ent.entityKey,
+          ...(ent.scope === "staff" ? { facility: ent.site, staffFacility: ent.site } : {}),
           category: cleanTitle(v.name || ""),
           sectionLabel: ent.sectionLabel,
           phaseIdx: ent.phaseIdx,

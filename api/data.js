@@ -30,11 +30,11 @@ module.exports = async (req, res) => {
   const master = url.searchParams.get("master");
   if (master) {
     if (!s || !s.admin) { res.status(403).json({ ok: false, error: "admins only" }); return; }
-    if (!["inspect", "status", "start", "step", "apply", "retry"].includes(master)) { res.status(400).json({ ok: false, error: "unknown intake action" }); return; }
-    if (!["inspect", "status"].includes(master) && req.method !== "POST") { res.status(405).json({ ok: false, error: "POST required" }); return; }
+    if (!["inspect", "status", "audit", "start", "step", "apply", "retry"].includes(master)) { res.status(400).json({ ok: false, error: "unknown intake action" }); return; }
+    if (!["inspect", "status", "audit"].includes(master) && req.method !== "POST") { res.status(405).json({ ok: false, error: "POST required" }); return; }
     try {
       const G = require("../lib/graph");
-      res.status(200).json(await require("../lib/master-intake").run(await G.accessToken(), master));
+      res.status(200).json(await require("../lib/master-intake").run(await G.accessToken(), master, url.searchParams.get("term")));
     } catch (e) {
       if (e.retryAfter) res.status(200).json({ ok: true, stage: "throttled", more: true, retryAfter: e.retryAfter });
       else res.status(502).json({ ok: false, error: String(e.message || e) });
