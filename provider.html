@@ -2,97 +2,50 @@
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sentinel — My Documents</title>
+<meta name="referrer" content="no-referrer">
+<title>Sentinel - My Documents</title>
 <style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;margin:0;min-height:100vh;padding:18px;
-    background:radial-gradient(900px 500px at 50% -5%,#134e4a,#05222a 60%,#021015);color:#e9eef3}
-  .wrap{max-width:560px;margin:0 auto}
-  h1{font-size:20px;margin:0 0 2px;color:#5eead4}.sub{color:#7fb8b0;font-size:13px;margin-bottom:18px}
-  .who{font-size:18px;font-weight:800;color:#fff;margin-bottom:4px}
-  .item{background:#111a22;border:1px solid #1e2b36;border-radius:14px;padding:14px 16px;margin-bottom:10px}
-  .item .cat{font-weight:700;font-size:15px}
-  .item .meta{font-size:12px;color:#9fb4c0;margin-top:2px}
-  .pill{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;margin-top:6px}
-  .on{background:#dcfce7;color:#166534}.miss{background:#fef3c7;color:#92400e}.exp{background:#fee2e2;color:#991b1b}
-  .act{margin-top:10px}
-  input[type=file]{width:100%;color:#e9eef3;font-size:13px;background:rgba(255,255,255,.06);padding:9px;border-radius:9px;border:1px solid rgba(255,255,255,.12);box-sizing:border-box}
-  button{margin-top:8px;padding:9px 14px;border:none;border-radius:9px;background:linear-gradient(135deg,#14b8a6,#0f766e);color:#fff;font-weight:700;font-size:13px;cursor:pointer}
-  button:disabled{opacity:.5}.m{font-size:12px;font-weight:600;margin-top:6px;min-height:14px}
+  *{box-sizing:border-box}body{font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;margin:0;min-height:100vh;padding:18px;background:radial-gradient(900px 500px at 50% -5%,#134e4a,#05222a 60%,#021015);color:#e9eef3}
+  .wrap{max-width:600px;margin:0 auto}.brand{color:#5eead4;font-size:20px;font-weight:800}.sub{color:#91bdb7;font-size:13px;margin:3px 0 18px}.identity{display:flex;align-items:center;gap:13px;margin:0 0 18px}.photo{width:72px;height:72px;border-radius:16px;object-fit:cover;background:#18313a;border:1px solid #31525a}.who{font-size:20px;font-weight:800;color:#fff}.summary{font-size:13px;color:#a8c8c5;margin-top:3px}
+  .item{background:#111a22;border:1px solid #1e2b36;border-radius:14px;padding:14px 16px;margin-bottom:10px}.cat{font-weight:700;font-size:15px}.meta{font-size:12px;color:#9fb4c0;margin-top:2px}.pill{display:inline-block;font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;margin-top:7px}.on{background:#dcfce7;color:#166534}.miss{background:#fef3c7;color:#92400e}.exp{background:#fee2e2;color:#991b1b}.act{margin-top:10px}input[type=file]{width:100%;color:#e9eef3;font-size:13px;background:rgba(255,255,255,.06);padding:9px;border-radius:9px;border:1px solid rgba(255,255,255,.12)}button{margin-top:8px;padding:9px 14px;border:0;border-radius:9px;background:linear-gradient(135deg,#14b8a6,#0f766e);color:#fff;font-weight:700;font-size:13px;cursor:pointer}button:disabled{opacity:.5}.m{font-size:12px;font-weight:600;margin-top:6px;min-height:14px}.notice{background:#111a22;border:1px solid #31525a;border-radius:14px;padding:18px;line-height:1.5}
 </style></head>
-<body><div class="wrap">
-  <h1>Sentinel — My Documents</h1>
+<body><main class="wrap">
+  <div class="brand">Sentinel - My Documents</div>
   <div class="sub">Wellness &amp; Care Group of Texas</div>
-  <div class="who" id="who">Loading…</div>
-  <div class="sub" id="summary"></div>
+  <div class="identity"><img class="photo" id="photo" alt="Provider photo" hidden><div><div class="who" id="who">Loading...</div><div class="summary" id="summary"></div></div></div>
   <div id="list"></div>
-</div>
+</main>
 <script>
-  var q=new URLSearchParams(location.search), ekey=q.get("e");
-  var items=[];
-  var who=document.getElementById("who"), list=document.getElementById("list");
-  function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){
-    return ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[c]; }); }
-  if(!ekey){ who.textContent="Welcome"; document.getElementById("summary").textContent="Please open the personal QR code or link your coordinator sent you — it knows which documents are yours."; }
-  else {
-    fetch("/api/provider?e="+encodeURIComponent(ekey)).then(function(r){return r.json();}).then(function(p){
-      if(!p.items||!p.items.length){ who.textContent="Link not recognized"; document.getElementById("summary").textContent="This link doesn’t match a provider on file. Please ask your coordinator for an updated link."; return; }
-      items=p.items; who.textContent=p.entity||items[0].entity;
-      return fetch("/api/uploads-map").then(function(r){return r.json();}).then(render).catch(function(){render({});});
-    }).catch(function(){ who.textContent="Couldn’t load"; document.getElementById("summary").textContent="Please try again in a moment."; });
+  var items=[], who=document.getElementById("who"), summary=document.getElementById("summary"), list=document.getElementById("list"), photo=document.getElementById("photo");
+  function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c];});}
+  function fail(message){who.textContent="Private link needed";summary.textContent="";list.innerHTML='<div class="notice">'+esc(message)+'</div>';}
+  fetch("/api/provider",{credentials:"same-origin"}).then(function(r){if(!r.ok)throw new Error(r.status===401?"This private link has expired or was not opened correctly. Please ask the compliance team for a new link.":"The portal could not be loaded.");return r.json();}).then(function(p){
+    if(!p.items||!p.items.length)throw new Error("No provider record was found for this private link.");
+    items=p.items;who.textContent=p.entity||items[0].entity;
+    if(p.hasPhoto){photo.hidden=false;photo.src="/api/provider?photo=1";photo.onerror=function(){photo.hidden=true;};}
+    return fetch("/api/uploads-map",{credentials:"same-origin"}).then(function(r){return r.ok?r.json():{};}).then(function(m){render((m&&m.attachments)||{});});
+  }).catch(function(e){fail(e.message||String(e));});
+  function state(it,onfile){
+    if(onfile)return["On file","on"];
+    if(it.expires){var d=new Date(it.expires+"T12:00:00"),days=Math.floor((d-new Date())/86400000);if(days<0)return["Expired - please send","exp"];if(days<=90)return["Renewing soon - please send","exp"];}
+    return["Needed","miss"];
   }
-  function status(it,onfile){
-    if(onfile) return ["On file","on"];
-    if(it.expires){ var d=new Date(it.expires), now=new Date(); var days=Math.floor((d-now)/86400000);
-      if(days<0) return ["Expired — please send","exp"]; if(days<=90) return ["Renewing soon — please send","exp"]; }
-    return ["Needed","miss"];
-  }
-  function render(map){
-    var have=0;
-    list.innerHTML="";
-    items.sort(function(a,b){return (a.category||"").localeCompare(b.category||"");});
+  function render(att){
+    var have=0;list.innerHTML="";items.sort(function(a,b){return(a.category||"").localeCompare(b.category||"");});
     items.forEach(function(it){
-      var onfile = it.isFile || (map && map[it.id]);
-      if(onfile) have++;
-      var st=status(it,onfile);
-      var row=document.createElement("div"); row.className="item";
-      // esc() these — category/authority/expires come from the Excel roster and (for
-      // scan-detected records) from file names, i.e. untrusted text on a login-less page.
-      row.innerHTML='<div class="cat">'+esc(it.category)+'</div>'+
-        '<div class="meta">'+esc(it.authority||"")+(it.expires?' · expires '+esc(it.expires):'')+'</div>'+
-        '<span class="pill '+st[1]+'">'+(onfile?'✓ ':'')+st[0]+'</span>'+
-        '<div class="act"><input type="file" accept="application/pdf,image/*" capture="environment"><button>Upload</button><div class="m"></div></div>';
-      var file=row.querySelector("input"), btn=row.querySelector("button"), m=row.querySelector(".m");
-      btn.onclick=function(){ doUpload(it,file,btn,m,row); };
-      list.appendChild(row);
+      var onfile=!!(it.isFile||att[it.id]);if(onfile)have++;var st=state(it,onfile),row=document.createElement("section");row.className="item";
+      row.innerHTML='<div class="cat">'+esc(it.category)+'</div><div class="meta">'+esc(it.authority||"")+(it.expires?' &middot; expires '+esc(it.expires):'')+'</div><span class="pill '+st[1]+'">'+(onfile?'&#10003; ':'')+st[0]+'</span><div class="act"><input type="file" accept="application/pdf,image/*" capture="environment"><button>Upload document</button><div class="m"></div></div>';
+      var file=row.querySelector("input"),btn=row.querySelector("button"),msg=row.querySelector(".m");btn.onclick=function(){upload(it,file,btn,msg,row);};list.appendChild(row);
     });
-    document.getElementById("summary").textContent=have+" of "+items.length+" documents on file.";
+    summary.textContent=have+" of "+items.length+" documents on file.";
   }
-  async function doUpload(it,file,btn,m,row){
-    var f=file.files[0]; if(!f){ m.style.color="#fca5a5"; m.textContent="Choose a file first."; return; }
-    btn.disabled=true; m.style.color="#9fd9d0"; m.textContent="Uploading…";
+  async function upload(it,input,btn,msg,row){
+    var f=input.files[0];if(!f){msg.style.color="#fca5a5";msg.textContent="Choose a file first.";return;}btn.disabled=true;msg.style.color="#9fd9d0";msg.textContent="Uploading...";
     try{
-      // Item id only — the server resolves the folder itself (never trust a caller-supplied path).
-      var s=await (await fetch("/api/upload-start?item="+encodeURIComponent(it.id)+"&name="+encodeURIComponent(f.name))).json();
-      if(!s.ok) throw new Error(s.message||"start failed");
-      var linked = await new Promise(function(res,rej){ var x=new XMLHttpRequest(); x.open("PUT",s.uploadUrl,true);
-        x.setRequestHeader("Content-Range","bytes 0-"+(f.size-1)+"/"+f.size);
-        x.onload=function(){ (x.status>=200&&x.status<300)?res(JSON.parse(x.responseText||"{}")):rej(new Error("HTTP "+x.status)); };
-        x.onerror=function(){rej(new Error("network error"));}; x.send(f);
-      }).then(function(put){
-        return fetch("/api/uploads-map",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({item_id:it.id,url:put.webUrl||"",name:f.name})})
-          .then(function(r){ return r.json().catch(function(){ return {ok:false,message:"HTTP "+r.status}; }); });
-      });
-      // Don't claim "On file" unless the credential was actually linked — the upload succeeding
-      // and the linking succeeding are two different things.
-      if (!linked || linked.ok === false) {
-        m.style.color="#fca5a5";
-        m.textContent="⚠ Uploaded, but not linked to this credential ("+((linked&&linked.message)||"unknown")+"). Please tell the compliance team.";
-        btn.disabled=false; return;
-      }
-      m.style.color="#6ee7b7"; m.textContent="✓ Received. Thank you!";
-      row.querySelector(".pill").className="pill on"; row.querySelector(".pill").textContent="✓ On file";
-      btn.disabled=false;
-    }catch(e){ m.style.color="#fca5a5"; m.textContent="Failed: "+(e.message||e); btn.disabled=false; }
+      var start=await fetch("/api/upload-start?item="+encodeURIComponent(it.id)+"&name="+encodeURIComponent(f.name),{credentials:"same-origin"}),s=await start.json();if(!start.ok||!s.ok)throw new Error(s.message||"Upload could not start");
+      var put=await new Promise(function(resolve,reject){var x=new XMLHttpRequest();x.open("PUT",s.uploadUrl,true);x.setRequestHeader("Content-Range","bytes 0-"+(f.size-1)+"/"+f.size);x.onload=function(){if(x.status>=200&&x.status<300){try{resolve(JSON.parse(x.responseText||"{}"));}catch(e){resolve({});}}else reject(new Error("Upload HTTP "+x.status));};x.onerror=function(){reject(new Error("Network error"));};x.send(f);});
+      var linkedResponse=await fetch("/api/uploads-map",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({item_id:it.id,url:put.webUrl||"",name:f.name})}),linked=await linkedResponse.json();if(!linkedResponse.ok||!linked.ok)throw new Error(linked.message||"Document uploaded but could not be linked");
+      msg.style.color="#6ee7b7";msg.textContent="Received. Thank you!";var pill=row.querySelector(".pill");pill.className="pill on";pill.textContent="On file";
+    }catch(e){msg.style.color="#fca5a5";msg.textContent="Failed: "+(e.message||e);}btn.disabled=false;
   }
-</script>
-</body></html>
+</script></body></html>

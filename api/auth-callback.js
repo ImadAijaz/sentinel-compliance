@@ -48,7 +48,7 @@ module.exports = async (req, res) => {
       res.status(403).send(page("Not authorized", "<p><b>" + esc(email) + "</b> isn’t on the access list for this dashboard.</p><p>Ask the administrator (Imad) to add you, then try again.</p>"));
       return;
     }
-    const token = sign({ email, name: claims.name || email, tabs: u.tabs, admin: !!u.admin, exp: Date.now() + 1000 * 60 * 60 * 12 }); // 12 hours
+    const token = sign({ type: "staff", email, name: claims.name || email, tabs: u.tabs, admin: !!u.admin, exp: Date.now() + 1000 * 60 * 60 * 12 }); // 12 hours
     res.setHeader("Set-Cookie", cookieHeader(token, 60 * 60 * 12));
     res.writeHead(302, { Location: "/" });
     res.end();

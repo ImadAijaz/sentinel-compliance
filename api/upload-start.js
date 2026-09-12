@@ -5,8 +5,8 @@
 // SECURITY: only a signed-in Sentinel user may ask the app-only Graph identity to create an
 // upload session. The destination is also derived SERVER-SIDE from the requested item's record;
 // a caller-supplied path is never trusted.
-const { accessToken, encPath, docsRoot, ensureFolderIn } = require("../lib/graph");
-const { getSession } = require("../lib/session");
+const { accessToken, encPath, docsRoot, ensureFolderIn, readJsonAt, drivePath } = require("../lib/graph");
+const { getSession, getProviderSession } = require("../lib/session");
 const data = require("../data.json");
 const { applyRosterDelta } = require("../lib/delta");
 const FAC = require("../lib/facility");
@@ -57,7 +57,8 @@ module.exports = async (req, res) => {
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
 
   const session = getSession(req);
-  if (!session) { res.status(401).json({ ok: false, message: "sign-in required" }); return; }
+  const provider = getProviderSession(req);
+  if (!session && !provider) { res.status(401).json({ ok: false, message: "private link or sign-in required" }); return; }
 
   try {
     const url = new URL(req.url, "http://localhost");
@@ -67,18 +68,27 @@ module.exports = async (req, res) => {
     const name = (url.searchParams.get("name") || "upload.bin").replace(/[^A-Za-z0-9 ._-]/g, "_");
     if (!itemId && !entityKey) { res.status(400).json({ ok: false, message: "missing item" }); return; }
 
-    // Resolve the destination from OUR data, not from the caller.
-    const allItems = await applyRosterDelta(data.items || []);
+    // Resolve the destination from OUR data, not from the caller. Include newly scanned
+    // supplemental rows so a provider can replace a photo or document that arrived after deploy.
+    const token = await accessToken();
+    let supplementals = [];
+    try { supplementals = Object.values((await readJsonAt(token, drivePath("_Sentinel/supplemental_detected.json"))) || {}); } catch (e) {}
+    const allItems = (await applyRosterDelta(data.items || [])).concat(supplementals);
     let target = null;
     if (itemId) target = allItems.find(i => i.id === itemId) || null;
     if (!target && entityKey) target = allItems.find(i => i.entityKey === entityKey) || null;
     if (!target) { res.status(404).json({ ok: false, message: "unknown item" }); return; }
-    const tabs = Array.isArray(session.tabs) ? session.tabs : [];
-    if (!session.admin && !tabs.includes(target.scope)) {
-      res.status(403).json({ ok: false, message: "this account cannot upload to that scope" }); return;
+    if (provider) {
+      if (target.scope !== "provider" || target.entityKey !== provider.entityKey) {
+        res.status(403).json({ ok: false, message: "this private link cannot upload for that person" }); return;
+      }
+    } else {
+      const tabs = Array.isArray(session.tabs) ? session.tabs : [];
+      if (!session.admin && !tabs.includes(target.scope)) {
+        res.status(403).json({ ok: false, message: "this account cannot upload to that scope" }); return;
+      }
     }
 
-    const token = await accessToken();
     // Always file new uploads into the organized SharePoint tree using the tracked item's scope,
     // entity and category.  The former folderLink path put every staff upload at the facility
     // root and provider uploads at the provider root, where the scanner could not attribute them.
@@ -87,7 +97,7 @@ module.exports = async (req, res) => {
     let folderPath = targetFolderForItem(target);
     if (!folderPath) { res.status(409).json({ ok: false, message: "unsupported item scope" }); return; }
     // Retain the explicit admin import phase only when it is one of the six known values.
-    if (target.scope === "provider" && phase && PHASES.includes(phase)) {
+    if (!provider && target.scope === "provider" && phase && PHASES.includes(phase)) {
       const seg = folderPath.split("/"); seg[4] = phase; folderPath = seg.join("/");
     }
     await ensureFolderIn(token, rootUrl, folderPath);

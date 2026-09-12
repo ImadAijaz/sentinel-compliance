@@ -604,7 +604,7 @@
       '<button id="qClear" class="q-clear" title="Clear search"' + (state.search ? '' : ' style="display:none"') + '>×</button></div>' +
       '<select class="ctrl" id="sortF" title="Sort by">' + sorts.map(([v, lab]) => '<option value="' + v + '"' + ((state.sort || "name") === v ? " selected" : "") + '>Sort: ' + lab + '</option>').join("") + '</select>' +
       '<select class="ctrl" id="catF"><option value="">All categories</option>' + cats.map(c => '<option' + (state.category === c ? " selected" : "") + '>' + esc(c) + '</option>').join("") + '</select>' +
-      (state.tab !== "provider" ? (function () { var its = tabItems(state.tab); var fc = function (fac) { var s = {}; its.forEach(function (i) { var f = i.scope === "staff" ? i.facility : i.entity; if (fac === "all" || f === fac) s[i.entityKey] = 1; }); return Object.keys(s).length; }; return '<div class="chips" id="facChips">' + [["all", "All"], ["Castle Hills ER", "Castle Hills"], ["Frisco ER", "Frisco"]].map(function (o) { return '<button class="chip' + (state.facility === o[0] ? " on" : "") + '" data-f="' + esc(o[0]) + '">' + o[1] + ' <span class="c">' + fc(o[0]) + '</span></button>'; }).join("") + '</div>'; })() : '') +
+      (state.tab !== "provider" ? (function () { var its = tabItems(state.tab); var fc = function (fac) { var s = {}; its.forEach(function (i) { var f = i.scope === "staff" ? i.facility : i.entity; if (fac === "all" || f === fac) s[i.entityKey] = 1; }); return Object.keys(s).length; }; var facilities = Array.from(new Set([].concat((window.SENTINEL_SEED && window.SENTINEL_SEED.facilities) || [], ["Urgent Care Ennis", "Urgent Care Plano"], its.map(function(i){return i.scope === "staff" ? i.facility : i.entity;}).filter(Boolean)))); var options = [["all", "All"]].concat(facilities.map(function(f){return [f, f.replace(/^(Urgent Care )/, "UC ").replace(/ ER$/, "")];})); return '<div class="chips" id="facChips">' + options.map(function (o) { return '<button class="chip' + (state.facility === o[0] ? " on" : "") + '" data-f="' + esc(o[0]) + '">' + esc(o[1]) + ' <span class="c">' + fc(o[0]) + '</span></button>'; }).join("") + '</div>'; })() : '') +
       (state.tab === "provider" || state.tab === "staff" ? '<label class="toggle-pill"><input type="checkbox" id="inact"' + (state.showInactive ? " checked" : "") + '> Show inactive</label>' : '') +
       '<div class="spacer" style="flex:1"></div>' +
       '<div class="seg" id="viewSeg">' +
@@ -821,13 +821,14 @@
       const testTag = isTest ? ' <span class="pill s-good" style="background:#16a34a;color:#fff">TEST</span>' : "";
       const head = el("div", "group-head" + ((!isProvider || isTest) ? " green" : ""));
       head.innerHTML = (state.selectMode ? '<input type="checkbox" class="row-check grp-check" title="Select all items in this group">' : "") +
-        '<div class="avatar" style="' + (isProvider ? "" : "background:linear-gradient(135deg,#6366f1,#4f46e5)") + '">' + (isProvider ? esc(initials) : '<svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">' + ICONS.building + '</svg>') + '</div>' +
+        (isProvider ? providerAvatar(name, items, "avatar") : '<div class="avatar" style="background:linear-gradient(135deg,#6366f1,#4f46e5)"><svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">' + ICONS.building + '</svg></div>') +
         '<div><div class="g-name"><span style="opacity:.55">' + (gi + 1) + '.</span> ' + esc(name) + testTag + inactiveTag + rosterNote + '</div><div class="g-meta">' + items.length + ' tracked items · health ' + gs.score + '</div></div>' +
-        '<div class="mini-stats">' + miniRing(gs.score) + pills + (isProvider ? '<button class="icon-btn profile-btn" title="Full credentialing profile in one table" style="padding:5px 10px">👤 Profile</button><button class="icon-btn pemail-btn" title="Email this provider (to their email)" style="padding:5px 10px">✉ Email provider</button><button class="icon-btn binder-btn" title="Print survey-ready binder" style="padding:5px 10px">🗂 Binder</button>' : '<button class="icon-btn gemail-btn" title="Email me this group\'s report" style="padding:5px 10px">✉ Email</button>') + '<span class="worst-dot bg-' + worst + '"></span></div>' +
+        '<div class="mini-stats">' + miniRing(gs.score) + pills + (isProvider ? '<button class="icon-btn profile-btn" title="Full credentialing profile in one table" style="padding:5px 10px">👤 Profile</button><button class="icon-btn portal-btn" title="Create a private provider link" style="padding:5px 10px">🔗 Private portal</button><button class="icon-btn pemail-btn" title="Email this provider (to their email)" style="padding:5px 10px">✉ Email provider</button><button class="icon-btn binder-btn" title="Print survey-ready binder" style="padding:5px 10px">🗂 Binder</button>' : '<button class="icon-btn gemail-btn" title="Email me this group\'s report" style="padding:5px 10px">✉ Email</button>') + '<span class="worst-dot bg-' + worst + '"></span></div>' +
         '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:20px;height:20px"><path d="M9 6l6 6-6 6"/></svg>';
       head.onclick = () => { state.openGroups[name] = !open; renderContent(); };
       g.appendChild(head);
       const prb = head.querySelector(".profile-btn"); if (prb) prb.onclick = (e) => { e.stopPropagation(); openProviderProfile(items[0].entityKey, name); };
+      const pob = head.querySelector(".portal-btn"); if (pob) pob.onclick = (e) => { e.stopPropagation(); openProviderPortal(items[0].entityKey, name); };
       const bb = head.querySelector(".binder-btn"); if (bb) bb.onclick = (e) => { e.stopPropagation(); printBinder(name); };
       const peb = head.querySelector(".pemail-btn"); if (peb) peb.onclick = (e) => { e.stopPropagation(); openEmailTemplate(items[0]); };
       const geb = head.querySelector(".gemail-btn"); if (geb) geb.onclick = (e) => { e.stopPropagation(); emailGroupToSelf(name, items); };
@@ -843,6 +844,7 @@
   function renderFacility(c, arr) {
     const knownFacilities = Array.from(new Set([].concat(
       (window.SENTINEL_SEED && window.SENTINEL_SEED.facilities) || [],
+      ["Urgent Care Ennis", "Urgent Care Plano"],
       arr.map(i => i.entity).filter(Boolean)
     )));
     const facs = state.facility === "all" ? knownFacilities : [state.facility];
@@ -855,7 +857,16 @@
     c.appendChild(sel);
     facs.forEach((f, fi) => {
       const items = arr.filter(i => i.entity === f);
-      if (!items.length) return;
+      if (!items.length) {
+        const emptyCard = el("div", "group glass open");
+        const emptyHead = el("div", "group-head green"); emptyHead.style.cursor = "default";
+        emptyHead.innerHTML = '<div class="avatar"><svg style="width:20px;height:20px" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">' + ICONS.building + '</svg></div>' +
+          '<div><div class="g-name"><span style="opacity:.55">' + (fi + 1) + '.</span> ' + esc(f) + '</div><div class="g-meta">0 tracked facility documents</div></div>';
+        const emptyBody = el("div", "group-body");
+        emptyBody.innerHTML = '<div class="empty" style="padding:28px"><h3>Ready for facility documents</h3><p>New State Requirements files for this location will appear here automatically after the office sync runs.</p></div>';
+        emptyCard.appendChild(emptyHead); emptyCard.appendChild(emptyBody); c.appendChild(emptyCard);
+        return;
+      }
       const gs = statsFor(items);
       const card = el("div", "group glass open");
       const head = el("div", "group-head green"); head.style.cursor = "default";
@@ -896,6 +907,17 @@
     return names.sort((a, b) => (STATUS_RANK[worstKey(groups[a])] - STATUS_RANK[worstKey(groups[b])]) || a.localeCompare(b));
   }
   function initials(name) { return name.split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase(); }
+  function providerPhotoItem(items) {
+    return (items || []).find(i => i && i.scope === "provider" && i.isFile && i.fileLink &&
+      /(?:^|\b)(?:photo|headshot|portrait)(?:\b|$)|badge[ _-]*photo/i.test([i.category, i.uploadName, i.fileLink].filter(Boolean).join(" ")));
+  }
+  function providerPhotoUrl(entityKey) { return "/api/provider?photo=1&e=" + encodeURIComponent(entityKey || ""); }
+  function providerAvatar(name, items, className) {
+    const fallback = esc(initials(name));
+    const photo = providerPhotoItem(items);
+    return '<div class="' + className + '"><span>' + fallback + '</span>' +
+      (photo ? '<img src="' + esc(providerPhotoUrl(items[0].entityKey)) + '" alt="" onerror="this.style.display=\'none\'">' : '') + '</div>';
+  }
 
   // open a proof file straight in the Microsoft 365 (Office/Outlook) web viewer
   function fileViewerUrl(it) {
@@ -917,7 +939,8 @@
     const urgent = exp + crit;
     const badge = exp ? ["action needed", "b-act"] : ((crit || due) ? ["in progress", "b-prog"] : ["ready", "b-ready"]);
     const barc = p => p < 40 ? "f-amber" : (p < 80 ? "f-pri" : "f-green");
-    const icon = isPeople ? '<div class="c-ic">' + esc(initials(name)) + '</div>'
+    const icon = tab === "provider" ? providerAvatar(name, items, "c-ic")
+      : isPeople ? '<div class="c-ic">' + esc(initials(name)) + '</div>'
       : '<div class="c-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div>';
     const test = items[0] && items[0].entityKey === "aijaz-imad" ? ' <span class="badge b-ready" style="margin-left:6px">TEST</span>' : "";
     const t = el("div", "tile tile-entity");
@@ -978,16 +1001,17 @@
     const gs = statsFor(items);
     const isProv = tab === "provider";
     const wrap = el("div", "ent-head glass");
-    wrap.innerHTML = '<div class="ent-ic">' + (isProv ? esc(initials(name)) : '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" style="width:20px;height:20px">' + ICONS.building + '</svg>') + '</div>' +
+    wrap.innerHTML = (isProv ? providerAvatar(name, items, "ent-ic") : '<div class="ent-ic"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" style="width:20px;height:20px">' + ICONS.building + '</svg></div>') +
       '<div class="ent-info"><div class="ent-nm">' + esc(name) + '</div><div class="ent-meta">' + items.length + ' tracked items</div></div>' +
       '<div class="ent-actions">' + (isProv
-        ? '<button class="icon-btn" data-a="profile" title="Full credentialing profile in one table">👤 Profile</button><button class="icon-btn" data-a="pemail">✉ Email provider</button><button class="icon-btn" data-a="binder">🗂 Binder</button>' +
+        ? '<button class="icon-btn" data-a="profile" title="Full credentialing profile in one table">👤 Profile</button><button class="icon-btn" data-a="portal">🔗 Private portal</button><button class="icon-btn" data-a="pemail">✉ Email provider</button><button class="icon-btn" data-a="binder">🗂 Binder</button>' +
           (isAdmin() ? '<button class="icon-btn" data-a="import" title="Copy documents from another OneDrive folder into this provider&#39;s Sentinel folder">📥 Import documents</button><button class="icon-btn" data-a="inact" title="Move to Inactive Providers (keeps the row, marks inactive)">📦 Mark inactive</button><button class="icon-btn danger" data-a="delprov" title="Permanently delete from the roster (recoverable from Recycle bin)">🗑 Delete</button>' : "")
         : '<button class="icon-btn" data-a="email">✉ Email</button><button class="icon-btn" data-a="binder">🗂 Binder</button>') +
       ((tab === "provider" || tab === "staff") ? '<button class="icon-btn" data-a="onboard">📋 Onboarding</button>' : '') + '</div>';
     const it0 = items[0] || {};
     const bind = (a, fn) => { const b = wrap.querySelector('[data-a="' + a + '"]'); if (b) b.onclick = fn; };
     bind("profile", () => openProviderProfile(it0.entityKey, name));
+    bind("portal", () => openProviderPortal(it0.entityKey, name));
     bind("import", () => openImportDocs(it0.entityKey, name));
     bind("pemail", () => openEmailTemplate(it0));
     bind("binder", () => printBinder(name));
@@ -997,6 +1021,34 @@
     bind("onboard", () => openOnboarding(it0.entityKey, name));
     return wrap;
   }
+
+  // Create a short-lived, private self-service link. The provider sees only their own checklist
+  // and can upload renewals straight into their organized SharePoint folder.
+  function openProviderPortal(entityKey, name) {
+    openModal("Private portal — " + esc(name), '<div class="loading" style="padding:28px"><div class="spinner"></div>Creating a private link…</div>');
+    fetch("/api/provider?issue=1", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entityKey: entityKey }),
+    }).then(async r => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || "Could not create the link");
+      const url = location.origin + d.path;
+      openModal("Private portal — " + esc(name),
+        '<div class="item-sub" style="margin-bottom:10px">Send this link only to <b>' + esc(name) +
+        '</b>. It opens their own document list and expires in <b>7 days</b>.</div>' +
+        '<input id="providerPortalUrl" readonly value="' + esc(url) + '" style="width:100%;padding:11px;border-radius:9px;border:1px solid var(--hair);background:var(--surface-solid);color:var(--ink)">' +
+        '<div class="drawer-actions" style="border:0;padding:12px 0 0"><button class="save" id="copyProviderPortal">Copy private link</button><button id="openProviderPortal">Open portal</button></div>' +
+        '<div class="item-sub" id="providerPortalMsg" style="margin-top:8px">Anyone with this link can view and upload documents for this provider until it expires.</div>');
+      const input = $("#providerPortalUrl"), msg = $("#providerPortalMsg");
+      $("#copyProviderPortal").onclick = async () => {
+        try { await navigator.clipboard.writeText(url); }
+        catch (e) { input.select(); document.execCommand("copy"); }
+        msg.textContent = "Private link copied.";
+      };
+      $("#openProviderPortal").onclick = () => window.open(url, "_blank", "noopener,noreferrer");
+    }).catch(e => openModal("Private portal — " + esc(name), '<div class="empty" style="padding:28px"><h3>Link could not be created</h3><p>' + esc(e.message || e) + '</p></div>'));
+  }
+
   // ================= PROVIDER PROFILE =================
   // Renders WCGTX's own "Physician Profile" form (the HR + Credentialing
   // internal review sheet) for one provider, filled in from the tracked roster data.
@@ -1068,7 +1120,9 @@
       '.pq-id{display:grid;grid-template-columns:118px 1fr 1fr;gap:9px;align-items:start}' +
       '.pq-photo{border:1px dashed var(--hair,#cbd5e1);border-radius:9px;height:132px;display:flex;flex-direction:column;' +
       'align-items:center;justify-content:center;text-align:center;font-size:9.5px;font-weight:800;letter-spacing:.07em;' +
-      'color:var(--ink-3,#94a3b8);padding:6px;gap:5px}' +
+      'color:var(--ink-3,#94a3b8);padding:6px;gap:5px;overflow:hidden;position:relative}' +
+      '.pq-photo img{width:100%;height:100%;object-fit:cover;border-radius:6px;display:block}' +
+      '.pq-photo .photo-tag{position:absolute;left:7px;bottom:7px;background:rgba(255,255,255,.9);color:var(--st-good,#047857);border-radius:999px;padding:3px 7px;letter-spacing:0}' +
       '.pq-f{border:1px solid var(--hair,#e2e8f0);border-radius:8px;padding:7px 9px;background:var(--surface-solid,#fff)}' +
       '.pq-f .k{font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3,#94a3b8)}' +
       '.pq-f .v{font-size:13px;font-weight:650;margin-top:2px;word-break:break-word}' +
@@ -1258,8 +1312,8 @@
       '<div class="pq-sub">Texas physician staffing &nbsp;|&nbsp; Physician credentialing record</div>';
 
     // ---- Identity ----------------------------------------------------------------------------
-    h += '<div class="pq-id"><div class="pq-photo"><div>PROFESSIONAL<br>HEADSHOT</div>' +
-      (p.headshot ? '<div style="color:var(--st-good,#047857)">☑ ON FILE</div>' : '<div>[ NOT ON FILE ]</div>') + '</div>' +
+    h += '<div class="pq-id"><div class="pq-photo">' +
+      (p.headshot ? '<img src="' + esc(providerPhotoUrl(p.entityKey)) + '" alt="' + esc(p.name) + ' headshot" onerror="this.style.display=\'none\'"><span class="photo-tag">☑ ON FILE</span>' : '<div>PROFESSIONAL<br>HEADSHOT</div><div>[ NOT ON FILE ]</div>') + '</div>' +
       '<div style="display:grid;gap:9px">' +
       fld("Physician name", p.name) +
       inp("Primary specialty", "pqSpecialty", p.specialty, "not recorded") +
@@ -2168,8 +2222,8 @@
     }
     const fileHref = isUrl ? raw : encodePath(raw);
     // "Open in Outlook" = open in the Microsoft 365 web (Office/OneDrive) viewer, where the user is signed in.
-    // The document URL comes from /api/uploads-map, which the login-less QR flow can write, so it
-    // is untrusted input: a value like  https://host/x?a=" onmouseover="…  would otherwise break
+    // The document URL comes from /api/uploads-map. Even though that route is private and pins
+    // links to WCGTX SharePoint, treat stored URLs as untrusted input: a malformed value could break
     // out of this href attribute and run script in the admin's authenticated session. Escape it,
     // and only ever emit http(s) or a local file path — never javascript:/data:.
     const safeHref = /^\s*(https?:|\/|[A-Za-z]:|\\)/.test(fileHref) ? fileHref : "#";
