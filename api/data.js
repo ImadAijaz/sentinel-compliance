@@ -35,7 +35,10 @@ module.exports = async (req, res) => {
     try {
       const G = require("../lib/graph");
       res.status(200).json(await require("../lib/master-intake").run(await G.accessToken(), master));
-    } catch (e) { res.status(502).json({ ok: false, error: String(e.message || e) }); }
+    } catch (e) {
+      if (e.retryAfter) res.status(200).json({ ok: true, stage: "throttled", more: true, retryAfter: e.retryAfter });
+      else res.status(502).json({ ok: false, error: String(e.message || e) });
+    }
     return;
   }
 

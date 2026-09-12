@@ -16,6 +16,11 @@ require("../lib/delta").applyRosterDelta = async () => [
 function file(name) { return { id: name, name, file: {}, parentReference: { id: "parent" }, webUrl: baseUrl + folder + "/" + name }; }
 let deltaCalls = 0;
 global.fetch = async url => {
+  if (url.includes("/root:/") && url.includes("?$select=id,folder")) return Response.json({ id: "sentinel-root", folder: {} });
+  if (url.includes("token=latest")) return Response.json({ "@odata.deltaLink": G.docsRoot() + "/root/delta?token=done" });
+  if (url.includes("/items/sentinel-root/children")) return Response.json({ value: [{ id: "readiness", name: "State Readiness", folder: {} }] });
+  if (url.includes("/items/readiness/children")) return Response.json({ value: [{ id: "ch", name: "Castle Hills", folder: {} }] });
+  if (url.includes("/items/ch/children")) return Response.json({ value: [file("COLA_02_26_2028.pdf"), file("COLA_01_17_2026.pdf"), file("QAPI_Minutes_08_01_2026.pdf")] });
   if (url.includes("/items/parent?")) return Response.json({ id: "parent", name: "08. Laboratory Services", parentReference: { path: "/drive/root:/" + folder } });
   if (url.includes("/root/delta")) {
     deltaCalls++;
@@ -35,6 +40,9 @@ const res = { setHeader() {}, status() { return this; }, json(v) { result = v; }
   assert.equal(detected.cola.date, "2028-02-26");
   assert.ok(detected.cola.url.endsWith("COLA_02_26_2028.pdf"));
   assert.equal(detected.qapi.date, "2026-09-01");
-  assert.equal(deltaCalls, 1);
+  assert.equal(deltaCalls, 0, "full scan stays inside Sentinel instead of walking the entire corporate drive");
+  await handler({ method: "GET", url: "/api/scan" }, res);
+  assert.equal(result.ok, true);
+  assert.equal(deltaCalls, 1, "subsequent passes use the captured incremental cursor");
   console.log("PASS cloud scan resolves missing parent paths, retains newest COLA, matches Other across facility sections, and reports completion accurately.");
 })().catch(e => { console.error(e); process.exitCode = 1; });

@@ -205,20 +205,26 @@ module.exports = async (req, res) => {
     // watching for changes from now on. This is the recovery path when folders that already exist
     // were never picked up — the normal first-run below starts at "latest", which by design skips
     // everything that was already there.
-    const forceRescan = new URL(req.url, "http://localhost").searchParams.get("rescan") === "1";
-    if (forceRescan) {
-      await writeJsonAt(token, STATE, { deltaLink: docsRoot() + "/root/delta", driveTag: "docs-v1", fullRescanStartedAt: new Date().toISOString() });
-    } else if (!state.deltaLink || state.driveTag !== "docs-v1") {
-      // First ever run: start from a full crawl too, NOT token=latest. Starting at "latest" meant
-      // every folder and file already on the drive was invisible to the app until it was touched
-      // again — which is exactly how an existing provider folder goes unnoticed.
-      await writeJsonAt(token, STATE, { deltaLink: docsRoot() + "/root/delta", driveTag: "docs-v1", fullRescanStartedAt: new Date().toISOString() });
-      res.status(200).json({ ok: true, initialized: true, fullCrawl: true, moreToScan: true, detected: 0, message: "Started a full scan of the documents folder." });
-      return;
+    const forceRescan = new URL(req.url, "http://localhost").searchParams.get("rescan") === "1" || state.driveTag !== "docs-v2";
+    if (forceRescan || !state.deltaLink) {
+      // Bound a full crawl to Sentinel, not every unrelated file in Corporate Archives.
+      // Capture the change cursor BEFORE walking, so changes during the walk are not lost.
+      const G = require("../lib/graph");
+      const [rootResponse, cursorResponse] = await Promise.all([
+        fetch(docsRoot() + "/root:/" + G.encPath("Sama Farooqui/Sentinel") + "?$select=id,folder", { headers: { Authorization: "Bearer " + token } }),
+        fetch(docsRoot() + "/root/delta?token=latest", { headers: { Authorization: "Bearer " + token } }),
+      ]);
+      if (!rootResponse.ok || !cursorResponse.ok) throw new Error("Could not initialize the full Sentinel document scan");
+      const root = await rootResponse.json(), cursor = await cursorResponse.json();
+      if (!root.folder || !cursor["@odata.deltaLink"]) throw new Error("Microsoft did not return the document folder or change cursor");
+      Object.assign(state, { deltaLink: cursor["@odata.deltaLink"], driveTag: "docs-v2", walkQueue: [{ id: root.id, rel: "Sama Farooqui/Sentinel" }], fullRescanStartedAt: new Date().toISOString(), pending: [], parentPaths: {}, inspected: 0, inSentinel: 0 });
+      await writeJsonAt(token, STATE, state);
     }
     const detected = (await readJsonAt(token, DETECTED)) || {};
     const supplemental = (await readJsonAt(token, SUPP)) || {};   // url -> full record
-    let next = forceRescan ? (docsRoot() + "/root/delta") : state.deltaLink;
+    const walking = Array.isArray(state.walkQueue);
+    const walkQueue = state.walkQueue || [];
+    let next = walking ? null : state.deltaLink;
     let deltaLink = null, changed = 0, suppChanged = 0, pages = 0, resynced = false, fetchError = null;
     let pending = forceRescan ? [] : (state.pending || []);
     const parentPaths = forceRescan ? {} : (state.parentPaths || {});
@@ -235,30 +241,42 @@ module.exports = async (req, res) => {
     }
     const folderErrors = [];   // surface folder-watch failures (e.g. trash write) instead of swallowing
     const start = Date.now();
-    while ((next || pending.length) && pages < 8 && Date.now() - start < 12000) {
+    while ((next || pending.length || walkQueue.length) && pages < 12 && Date.now() - start < 15000) {
       if (!pending.length) {
-      const r = await fetch(next, { headers: { Authorization: "Bearer " + token } });
+      const directory = walking ? walkQueue[0] : null;
+      const pageUrl = directory ? (directory.next || docsRoot() + "/items/" + encodeURIComponent(directory.id) + "/children?$select=id,name,file,folder,parentReference,webUrl&$top=500") : next;
+      const r = await fetch(pageUrl, { headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(10000) });
       if (!r.ok) {
         const body = await r.text().catch(() => "");
         // A delta token eventually expires; Graph answers 410 Gone / resyncRequired. The old code
         // just broke out of the loop and then wrote the SAME dead link back, so the scan was
         // permanently and SILENTLY dead — no new folder or file was ever detected again, while
         // still reporting ok:true. Recover by restarting the crawl from the beginning.
-        if (r.status === 410 || /resyncRequired|resync/i.test(body)) {
-          next = docsRoot() + "/root/delta";
-          resynced = true;
-          deltaLink = null;
-          pages++;
-          continue;
+        if (!walking && (r.status === 410 || /resyncRequired|resync/i.test(body))) {
+          state.driveTag = "expired";
+          fetchError = "Change cursor expired; a full Sentinel scan will restart on the next pass";
+          break;
         }
         fetchError = "delta HTTP " + r.status + " " + body.slice(0, 140);
         break;
       }
       const j = await r.json();
       pending = j.value || [];
-      next = j["@odata.nextLink"] || null; deltaLink = j["@odata.deltaLink"] || deltaLink; pages++;
+      if (directory) {
+        walkQueue.shift();
+        if (j["@odata.nextLink"]) walkQueue.push({ ...directory, next: j["@odata.nextLink"] });
+        for (const item of pending) {
+          item.parentReference = { ...(item.parentReference || {}), path: "root:/" + directory.rel };
+          if (item.folder) {
+            const rel = directory.rel + "/" + item.name;
+            const top = directory.rel === "Sama Farooqui/Sentinel";
+            if ((!top || ["Provider", "Staff", "State Readiness"].includes(item.name)) && !require("../lib/master-filing").excluded(rel)) walkQueue.push({ id: item.id, rel });
+          }
+        }
+      } else { next = j["@odata.nextLink"] || null; deltaLink = j["@odata.deltaLink"] || deltaLink; }
+      pages++;
       }
-      while (pending.length && Date.now() - start < 12000) {
+      while (pending.length && Date.now() - start < 15000) {
         const v = pending[0];
         if (!v.file || v.deleted) { pending.shift(); continue; }
         let folderRel;
@@ -369,9 +387,10 @@ module.exports = async (req, res) => {
     // page, `next` is the nextLink mid-crawl; only fall back to the previous cursor if we have
     // neither AND the previous one didn't just fail.
     const nextCursor = deltaLink || next || state.deltaLink;
-    const moreToScan = pending.length > 0 || (!!next && !deltaLink);
+    const moreToScan = pending.length > 0 || walkQueue.length > 0 || (!!next && !deltaLink);
     await writeJsonAt(token, STATE, {
-      deltaLink: nextCursor, driveTag: "docs-v1", pending, parentPaths,
+      deltaLink: nextCursor, driveTag: state.driveTag, pending, parentPaths,
+      ...(walking && moreToScan ? { walkQueue } : {}),
       inspected: (forceRescan ? 0 : state.inspected || 0) + inspected,
       inSentinel: (forceRescan ? 0 : state.inSentinel || 0) + inSentinel,
       lastPassAt: new Date().toISOString(),
