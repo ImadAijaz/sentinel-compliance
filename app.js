@@ -137,29 +137,14 @@
     DATA.forEach(it => {
       const v = ATTACHMENTS[it.id]; if (!v) return;
       const url = (typeof v === "string") ? v : v.url; if (!url) return;
-      it.fileLink = url; it.isFile = true; it.uploaded = true;
-      if (typeof v === "object" && v.name) it.uploadName = v.name;
+      Object.assign(it, window.SentinelEvidence.apply(it, v, !!OVERLAY.edits[it.id]));
       if (typeof v === "object" && v.recordDate) {
-        it.recordDate = v.recordDate;
-        it.recurringFromDocument = !!v.recurring;
         if (v.recurring) {
           const effectiveDue = (v.date && (!it.expires || v.date > it.expires)) ? v.date : it.expires;
           it.notes = "Latest evidence: " + v.recordDate +
             (effectiveDue ? "; next due: " + effectiveDue : "; cadence not configured") +
             (v.cadenceNote ? ". " + v.cadenceNote + "." : "");
         }
-      }
-      // A date parsed out of a FILENAME is a guess (a phone-scan name like "Scan_2026-01-05.pdf"
-      // is the scan date, not the expiry), so flag it as unconfirmed rather than presenting it as
-      // the real expiry. Never override a human's explicit edit.
-      if (typeof v === "object" && v.date && !OVERLAY.edits[it.id]) {
-        // Recurring evidence is forward-only: a late-arriving old inspection must not drag the
-        // current due date backwards.  Preserve the historical behavior for ordinary uploads.
-        if (!v.recurring || !it.expires || v.date > it.expires) it.expires = v.date;
-        it.permanent = false; it.pending = false;
-        it.expiresAuto = true;
-        it.expiresFromFilename = !v.recurring;
-        it.recurringFromDocument = !!v.recurring;
       }
     });
   }
@@ -173,11 +158,11 @@
     seed.forEach(it => {
       if (del.has(it.id)) return;
       seedIds.add(it.id);
-      out.push(OVERLAY.edits[it.id] ? Object.assign({}, it, OVERLAY.edits[it.id]) : it);
+      out.push(Object.assign({}, it, OVERLAY.edits[it.id] || {}));
     });
-    (OVERLAY.added || []).forEach(it => { if (!del.has(it.id)) { seedIds.add(it.id); out.push(it); } });
+    (OVERLAY.added || []).forEach(it => { if (!del.has(it.id)) { seedIds.add(it.id); out.push(Object.assign({}, it)); } });
     // Append live supplementals not already represented in the seed (avoid double-listing).
-    LIVE_SUPP.forEach(it => { if (it && it.id && !seedIds.has(it.id) && !del.has(it.id)) out.push(it); });
+    LIVE_SUPP.forEach(it => { if (it && it.id && !seedIds.has(it.id) && !del.has(it.id)) out.push(Object.assign({}, it)); });
     DATA = out;
     // Re-attach the known documents. Attachments are applied by MUTATING items, so any code that
     // replaces window.SENTINEL_SEED with a fresh /api/data payload (Sync from Excel, add/delete,
@@ -929,6 +914,12 @@
   function openFile(it) { const u = fileViewerUrl(it); if (u) window.open(u, "_blank", "noopener"); else openDrawer(it, false); }
 
   function entityTile(name, items, tab, serial) {
+    if (!items.length) {
+      const t = el("div", "tile tile-entity");
+      t.innerHTML = '<span class="badge b-prog">Not assessed</span><div class="c-name">' + esc(name) + '</div><div class="tile-meta">No facility documents imported yet. Readiness is unknown.</div>';
+      t.onclick = () => navigate([name]);
+      return t;
+    }
     const gs = statsFor(items);
     const isPeople = tab === "provider" || tab === "staff";
     const total = items.length;
@@ -1720,6 +1711,7 @@
       '<div class="item-sub" style="margin-bottom:8px">Walks the whole Sentinel documents tree again from the start. Use this if you added a provider folder or documents in OneDrive and the app did not pick them up. Safe to run any time — it only reads.</div>' +
       '<button class="btn-primary" id="stRescan" style="min-width:150px">Rescan everything</button>' +
       '<span id="stRescanMsg" class="pf-sub pf-dim" style="margin-left:9px"></span></div>' +
+      '<div style="margin-top:14px"><a href="/master-intake.html" target="_blank" rel="noopener">Master-folder intake and coverage</a> — inspect the source folders and verify copies into SharePoint.</div>' +
       // Trace one name through Excel -> baked data -> cache -> dashboard, so "I can't see Dr X"
       // gets a specific answer instead of guesswork.
       '<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--hair,#e2e8f0)">' +
@@ -1790,17 +1782,17 @@
         round++;
         m.textContent = "Scanning… pass " + round;
         fetch("/api/scan" + (first ? "?rescan=1" : "")).then(r => r.json()).then(d => {
-          if (d && d.ok === false) { m.textContent = d.message || "Scan failed."; rescanBtn.disabled = false; return; }
+          if (!d || d.ok === false || d.error) { m.textContent = "Scan incomplete: " + ((d && (d.message || d.error)) || "Scan failed."); rescanBtn.disabled = false; return; }
           totalNew += (d && d.changed) || 0;
           totalSupp += (d && d.suppChanged) || 0;
           // Bounded so a very large drive can't spin forever in one sitting.
-          if (d && d.moreToScan && round < 25) { step(false); return; }
+          if (d && (d.moreToScan || d.busy)) { setTimeout(() => step(false), d.busy ? 3000 : 500); return; }
           rescanBtn.disabled = false;
           m.textContent = "Done after " + round + " pass" + (round === 1 ? "" : "es") + " — " +
             totalNew + " document(s) matched, " + totalSupp + " new file record(s)" +
             (d && d.resynced ? " (the scan cursor had expired and was reset)" : "") +
-            (d && d.error ? " — " + d.error : "") + ". Now click “Sync from Excel”.";
-          if (totalNew || totalSupp) toast("✓ Rescan found " + (totalNew + totalSupp) + " item(s). Click 'Sync from Excel' next.");
+            ". Dashboard refreshes automatically.";
+          readUploadsMap().then(u => { applyUploads(u); render(); }).catch(() => {});
         }).catch(e => { rescanBtn.disabled = false; m.textContent = String(e.message || e); });
       };
       step(true);
@@ -2027,6 +2019,15 @@
     const tabLabel = tab === "provider" ? "Providers" : tab === "staff" ? "Staff" : tab === "facility" ? "Facilities" : "Operations";
     const groups = {};
     arr.forEach(i => (groups[i.entity] = groups[i.entity] || []).push(i));
+
+    // A known site must remain visible even before its first facility document arrives.
+    // Do not pretend an empty checklist is survey-ready, or inject it into filtered results.
+    if (tab === "facility" && !state.status && !state.category && !(state.search || "").trim()) {
+      const sites = (window.SENTINEL_SEED && window.SENTINEL_SEED.facilities) || [];
+      sites.forEach(name => {
+        if (state.facility === "all" || state.facility === name) groups[name] = groups[name] || [];
+      });
+    }
 
     // flow-chart breadcrumb + back
     const trail = [tabLabel].concat(state.drill);

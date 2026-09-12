@@ -26,8 +26,8 @@
     return fetch("/api/uploads-map",{credentials:"same-origin"}).then(function(r){return r.ok?r.json():{};}).then(function(m){render((m&&m.attachments)||{});});
   }).catch(function(e){fail(e.message||String(e));});
   function state(it,onfile){
-    if(onfile)return["On file","on"];
     if(it.expires){var d=new Date(it.expires+"T12:00:00"),days=Math.floor((d-new Date())/86400000);if(days<0)return["Expired - please send","exp"];if(days<=90)return["Renewing soon - please send","exp"];}
+    if(onfile)return[it.expires?"Current":"On file","on"];
     return["Needed","miss"];
   }
   function render(att){
@@ -45,7 +45,7 @@
       var start=await fetch("/api/upload-start?item="+encodeURIComponent(it.id)+"&name="+encodeURIComponent(f.name),{credentials:"same-origin"}),s=await start.json();if(!start.ok||!s.ok)throw new Error(s.message||"Upload could not start");
       var put=await new Promise(function(resolve,reject){var x=new XMLHttpRequest();x.open("PUT",s.uploadUrl,true);x.setRequestHeader("Content-Range","bytes 0-"+(f.size-1)+"/"+f.size);x.onload=function(){if(x.status>=200&&x.status<300){try{resolve(JSON.parse(x.responseText||"{}"));}catch(e){resolve({});}}else reject(new Error("Upload HTTP "+x.status));};x.onerror=function(){reject(new Error("Network error"));};x.send(f);});
       var linkedResponse=await fetch("/api/uploads-map",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({item_id:it.id,url:put.webUrl||"",name:f.name})}),linked=await linkedResponse.json();if(!linkedResponse.ok||!linked.ok)throw new Error(linked.message||"Document uploaded but could not be linked");
-      msg.style.color="#6ee7b7";msg.textContent="Received. Thank you!";var pill=row.querySelector(".pill");pill.className="pill on";pill.textContent="On file";
+      msg.style.color="#6ee7b7";msg.textContent="Received. Refreshing the verified status...";location.reload();
     }catch(e){msg.style.color="#fca5a5";msg.textContent="Failed: "+(e.message||e);}btn.disabled=false;
   }
 </script></body></html>

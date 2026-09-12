@@ -5,6 +5,7 @@
 const { accessToken, docsRoot, docsPathFromUrl, drivePath, readJsonAt, writeJsonAt, dateFromName } = require("../lib/graph");
 const { applyRosterDelta } = require("../lib/delta");
 const FAC = require("../lib/facility");
+const evidence = require("../lib/evidence");
 // Re-read data.json fresh on each invocation (don't cache via require — warm lambdas would
 // keep a stale index, missing newly added providers/items).
 const fs = require("fs");
@@ -125,19 +126,22 @@ function itemFolderRel(it) {
   }
   return docsPathFromUrl((it && (it.folderLink || it.fileLink)) || "");
 }
+function ownerRoot(folder) {
+  const m = String(folder || "").match(/^(.*?Sentinel\/(?:Provider\/[^/]+|Staff\/[^/]+\/[^/]+|State Readiness\/[^/]+))(?:\/|$)/i);
+  return m ? m[1].toLowerCase() : folder;
+}
 // Build the folder->items index from the LIVE item set (baked data.json + the roster delta).
 // It used to read the baked data only, so a provider added through "+ Add provider" was absent
 // from the index: every document later dropped into their brand-new folder matched nothing and
 // their credentials stayed "0 on file" until a full offline regenerate. That is the very first
 // thing a new client does, so it has to work.
 async function indexAsync() {
-  if (INDEX) return INDEX;
   const base = getData().items || [];
   let items = base;
   try { items = await applyRosterDelta(base); } catch (e) { items = base; }
   const folders = {};
   for (const it of items) {
-    const rel = itemFolderRel(it);
+    const rel = ownerRoot(itemFolderRel(it));
     if (!rel) continue;
     (folders[rel] = folders[rel] || []).push(it);
   }
@@ -149,26 +153,28 @@ function index() {
   if (INDEX) return INDEX;
   const folders = {};
   for (const it of (getData().items || [])) {
-    const rel = itemFolderRel(it);
+    const rel = ownerRoot(itemFolderRel(it));
     if (!rel) continue;
     (folders[rel] = folders[rel] || []).push(it);
   }
   INDEX = { folders, rels: Object.keys(folders).sort((a, b) => b.length - a.length) };
   return INDEX;
 }
-function matchItem(folderRel, fileName) {
+function matchItems(folderRel, fileName) {
   const { folders, rels } = index();
-  const rel = rels.find(r => folderRel === r || folderRel.startsWith(r + "/"));
-  if (!rel) return null;
+  const root = ownerRoot(folderRel);
+  const rel = rels.find(r => root === r);
+  if (!rel) return [];
+  const found = [];
   for (const it of folders[rel]) {
-    if (it.scope === "other") continue; // recurring rows need multi-match + cadence handling below
-    const rule = FILE_RULES[it.category]; if (rule && new RegExp(rule, "i").test(normf(folderRel + "/" + fileName))) return it;
+    if (it.scope === "other" || it.supplemental) continue;
+    const rule = FILE_RULES[it.category]; if (rule && new RegExp(rule, "i").test(normf(fileName))) found.push(it);
   }
-  return null;
+  return found;
 }
 function matchRecurringItems(folderRel, fileName) {
   const { folders, rels } = index();
-  const rel = rels.find(r => folderRel === r || folderRel.startsWith(r + "/"));
+  const rel = rels.find(r => ownerRoot(folderRel) === r);
   if (!rel) return [];
   return FAC.matchRecurringObligations(folders[rel], folderRel + "/" + fileName, fileName);
 }
@@ -181,11 +187,7 @@ function relFromParent(path) {
 }
 
 module.exports = async (req, res) => {
-  // No wildcard CORS here: this endpoint WRITES. It can auto-fill expiry dates into the master
-  // Excel, snapshot the workbook, and drop roster rows when a provider folder disappears. It
-  // previously had no authentication at all, so any anonymous caller could mutate the company's
-  // source-of-truth spreadsheet. Only the signed-in dashboard calls it — require a session, or
-  // the cron secret for scheduled runs.
+  // Writes Sentinel's evidence cache only. Never edits the roster or source documents.
   res.setHeader("Cache-Control", "no-store");
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
   const { getSession, isCronRequest } = require("../lib/session");
@@ -195,6 +197,9 @@ module.exports = async (req, res) => {
     // before any matching happens.
     await indexAsync();
     const token = await accessToken();
+    const release = await require("../lib/master-intake").lock(token, "scan");
+    if (!release) { res.status(200).json({ ok: true, busy: true, moreToScan: true }); return; }
+    try {
     const state = (await readJsonAt(token, STATE)) || {};
     // ?rescan=1 forces a FULL re-crawl of the document tree from the beginning, instead of only
     // watching for changes from now on. This is the recovery path when folders that already exist
@@ -208,17 +213,30 @@ module.exports = async (req, res) => {
       // every folder and file already on the drive was invisible to the app until it was touched
       // again — which is exactly how an existing provider folder goes unnoticed.
       await writeJsonAt(token, STATE, { deltaLink: docsRoot() + "/root/delta", driveTag: "docs-v1", fullRescanStartedAt: new Date().toISOString() });
-      res.status(200).json({ ok: true, initialized: true, fullCrawl: true, detected: 0, message: "Started a full scan of the documents folder — run this again (or just reload) to work through it." });
+      res.status(200).json({ ok: true, initialized: true, fullCrawl: true, moreToScan: true, detected: 0, message: "Started a full scan of the documents folder." });
       return;
     }
     const detected = (await readJsonAt(token, DETECTED)) || {};
     const supplemental = (await readJsonAt(token, SUPP)) || {};   // url -> full record
     let next = forceRescan ? (docsRoot() + "/root/delta") : state.deltaLink;
     let deltaLink = null, changed = 0, suppChanged = 0, pages = 0, resynced = false, fetchError = null;
+    let pending = forceRescan ? [] : (state.pending || []);
+    const parentPaths = forceRescan ? {} : (state.parentPaths || {});
+    let inspected = 0, inSentinel = 0;
+    async function parentPath(id, depth = 0) {
+      if (!id || depth > 30) throw new Error("Cannot resolve a document's parent folder");
+      if (Object.prototype.hasOwnProperty.call(parentPaths, id)) return parentPaths[id];
+      const r = await fetch(docsRoot() + "/items/" + encodeURIComponent(id) + "?$select=id,name,parentReference,root", { headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(10000) });
+      if (!r.ok) throw new Error("Resolve document parent HTTP " + r.status);
+      const p = await r.json();
+      if (p.root || !p.parentReference) return (parentPaths[id] = "");
+      const parent = relFromParent(p.parentReference.path) ?? await parentPath(p.parentReference.id, depth + 1);
+      return (parentPaths[id] = [parent, p.name].filter(Boolean).join("/"));
+    }
     const folderErrors = [];   // surface folder-watch failures (e.g. trash write) instead of swallowing
-    const dateUpdates = [];     // {entityKey,category,date} to auto-fill into the Credentials sheet (empty cells only)
     const start = Date.now();
-    while (next && pages < 8 && Date.now() - start < 4000) {   // keep the delta crawl inside the function budget
+    while ((next || pending.length) && pages < 8 && Date.now() - start < 12000) {
+      if (!pending.length) {
       const r = await fetch(next, { headers: { Authorization: "Bearer " + token } });
       if (!r.ok) {
         const body = await r.text().catch(() => "");
@@ -237,11 +255,21 @@ module.exports = async (req, res) => {
         break;
       }
       const j = await r.json();
-      for (const v of (j.value || [])) {
-        const folderRel = relFromParent((v.parentReference && v.parentReference.path) || "");
+      pending = j.value || [];
+      next = j["@odata.nextLink"] || null; deltaLink = j["@odata.deltaLink"] || deltaLink; pages++;
+      }
+      while (pending.length && Date.now() - start < 12000) {
+        const v = pending[0];
+        if (!v.file || v.deleted) { pending.shift(); continue; }
+        let folderRel;
+        try { folderRel = relFromParent((v.parentReference && v.parentReference.path) || "") ?? await parentPath(v.parentReference && v.parentReference.id); }
+        catch (e) { fetchError = String(e.message || e); break; }
+        pending.shift(); inspected++;
         // Only the Sentinel tree, case-insensitive + boundary-anchored, and skip archive subpaths.
         if (!folderRel || !/(^|\/)Sentinel(\/|$)/i.test(folderRel)) continue;
         if (isArchivedPath(folderRel)) continue;
+        if (require("../lib/master-filing").excluded(folderRel)) continue;
+        inSentinel++;
         // A SharePoint folder is document storage, not roster authority. Ignore provider-folder
         // events here: additions and removals must come from the master Excel roster. In
         // particular, deleting or archiving a folder must never hard-delete a provider row.
@@ -249,17 +277,15 @@ module.exports = async (req, res) => {
           continue;
         }
         if (!v.file && !v.deleted) continue;
-        const it = matchItem(folderRel, v.name || "");
+        const matched = matchItems(folderRel, v.name || "");
         const recurring = matchRecurringItems(folderRel, v.name || "");
         let matchedTracked = false;
-        if (it) {
+        for (const it of matched) {
           if (v.deleted) { if (detected[it.id] && detected[it.id].name === v.name) { delete detected[it.id]; changed++; } }
           else {
             const nameDate = dateFromName(v.name);
-            detected[it.id] = Object.assign({}, detected[it.id], { url: v.webUrl || "", name: v.name, date: nameDate || (detected[it.id] || {}).date || null });
-            changed++;
-            // a fresh expiry from the filename → queue an Excel auto-fill (empty cells only)
-            if (nameDate && it.entityKey && it.category) dateUpdates.push({ entityKey: it.entityKey, category: it.category, date: nameDate });
+            const selected = evidence.choose(detected[it.id], { url: v.webUrl || "", name: v.name, date: nameDate || null });
+            if (JSON.stringify(selected) !== JSON.stringify(detected[it.id])) { detected[it.id] = selected; changed++; }
           }
           matchedTracked = true;
         }
@@ -334,7 +360,7 @@ module.exports = async (req, res) => {
         supplemental[key] = rec;
         suppChanged++;
       }
-      next = j["@odata.nextLink"]; deltaLink = j["@odata.deltaLink"] || deltaLink; pages++;
+      if (fetchError) break;
     }
     // Save delta progress before any workbook update so nothing is lost on timeout.
     if (changed) await writeJsonAt(token, DETECTED, detected);
@@ -342,23 +368,23 @@ module.exports = async (req, res) => {
     // Never write back a link we know is dead. `deltaLink` is the fresh cursor from a completed
     // page, `next` is the nextLink mid-crawl; only fall back to the previous cursor if we have
     // neither AND the previous one didn't just fail.
-    const nextCursor = deltaLink || next || (fetchError ? (docsRoot() + "/root/delta") : state.deltaLink);
-    await writeJsonAt(token, STATE, { deltaLink: nextCursor, driveTag: "docs-v1" });
-
-    // Auto-fill detected expiry dates into empty cells of the Credentials sheet.
-    let excelFill = null;
-    if (dateUpdates.length) {
-      const xl = require("../lib/excel");
-      try { excelFill = await xl.fillEmptyDates(token, dateUpdates); }
-      catch (e) { excelFill = { error: String(e.message || e).slice(0, 160) }; }
-    }
+    const nextCursor = deltaLink || next || state.deltaLink;
+    const moreToScan = pending.length > 0 || (!!next && !deltaLink);
+    await writeJsonAt(token, STATE, {
+      deltaLink: nextCursor, driveTag: "docs-v1", pending, parentPaths,
+      inspected: (forceRescan ? 0 : state.inspected || 0) + inspected,
+      inSentinel: (forceRescan ? 0 : state.inSentinel || 0) + inSentinel,
+      lastPassAt: new Date().toISOString(),
+      completedAt: !moreToScan && !fetchError ? new Date().toISOString() : state.completedAt,
+    });
 
     // Report the crawl state, so a stalled or recovering scan is visible instead of silent.
     res.status(200).json({
       ok: true, changed, suppChanged, items: Object.keys(detected).length,
-      suppItems: Object.keys(supplemental).length, folderErrors, excelFill,
-      pages, resynced, moreToScan: !!next && !deltaLink, error: fetchError || undefined,
+      suppItems: Object.keys(supplemental).length, folderErrors,
+      pages, resynced, inspected, inSentinel, moreToScan, error: fetchError || undefined,
     });
+    } finally { await release(); }
   } catch (e) {
     res.status(200).json({ ok: false, message: String(e.message || e) });
   }

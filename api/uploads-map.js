@@ -5,6 +5,7 @@ const { accessToken, readJsonAt, writeJsonAt, drivePath, dateFromName } = requir
 const { getSession, getProviderSession } = require("../lib/session");
 const { applyRosterDelta } = require("../lib/delta");
 const data = require("../data.json");
+const evidence = require("../lib/evidence");
 
 const UPLOADS = drivePath("_Sentinel/uploads.json");
 const DETECTED = drivePath("_Sentinel/auto_detected.json");
@@ -51,13 +52,11 @@ module.exports = async (req, res) => {
     const allowedIds = new Set(byId.keys());
 
     if (req.method === "GET") {
-      // App uploads win for URL/name, but keep a date from either source.
+      // The newest dated proof wins, regardless of how or when it was uploaded.
       const merged = Object.assign({}, pickMap(detected, allowedIds));
       const selectedUploads = pickMap(uploads, allowedIds);
       for (const id in selectedUploads) {
-        const prev = merged[id] || {};
-        merged[id] = Object.assign({}, prev, selectedUploads[id]);
-        if (!merged[id].date && prev.date) merged[id].date = prev.date;
+        merged[id] = evidence.choose(merged[id], selectedUploads[id]);
       }
       res.status(200).json({
         attachments: merged,
@@ -79,10 +78,10 @@ module.exports = async (req, res) => {
       if (host !== TENANT_HOST) { res.status(400).json({ ok: false, message: "url must point to " + TENANT_HOST }); return; }
 
       const map = uploads || {};
-      map[b.item_id] = {
+      map[b.item_id] = evidence.choose(map[b.item_id], {
         url: String(b.url), name: String(b.name || "").slice(0, 300),
         date: dateFromName(b.name || ""),
-      };
+      });
       await writeJsonAt(token, UPLOADS, map);
       res.status(200).json({ ok: true });
       return;

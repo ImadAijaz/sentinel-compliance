@@ -51,7 +51,8 @@ async function providerItems() {
   const base = baseAll.filter(i => i && i.scope === "provider");
   const byId = new Map();
   base.concat(live).forEach(i => { if (i && i.id) byId.set(i.id, i); });
-  return Array.from(byId.values());
+  const evidence = await require("../lib/live-evidence").readEvidence(await accessToken());
+  return Array.from(byId.values()).map(i => require("../lib/evidence").apply(i, evidence[i.id]));
 }
 function sendRedirect(res, location, cookie) {
   if (cookie) res.setHeader("Set-Cookie", cookie);

@@ -26,6 +26,19 @@ module.exports = async (req, res) => {
   const s = getSession(req);
   if (!s && !(isCron && url.searchParams.get("regen") === "1")) { res.status(401).json({ error: "sign-in required" }); return; }
 
+  // Admin-only resumable cloud intake, within the existing function budget.
+  const master = url.searchParams.get("master");
+  if (master) {
+    if (!s || !s.admin) { res.status(403).json({ ok: false, error: "admins only" }); return; }
+    if (!["inspect", "status", "start", "step", "apply", "retry"].includes(master)) { res.status(400).json({ ok: false, error: "unknown intake action" }); return; }
+    if (!["inspect", "status"].includes(master) && req.method !== "POST") { res.status(405).json({ ok: false, error: "POST required" }); return; }
+    try {
+      const G = require("../lib/graph");
+      res.status(200).json(await require("../lib/master-intake").run(await G.accessToken(), master));
+    } catch (e) { res.status(502).json({ ok: false, error: String(e.message || e) }); }
+    return;
+  }
+
   // ---- hourly cron regen: pull the live Excel + write roster_delta.json to OneDrive.
   //      /api/data merges the delta on every read, so changes propagate within seconds
   //      of the cron firing (not a full Python regen — those need data-entry tools we
